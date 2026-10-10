@@ -6,7 +6,7 @@ redirect the dog before it reacts.
 
 ```
 EMG sensor → Arduino Nano ──USB serial──▶ bridge ──HTTP──▶ server ──Expo push──▶ owner's phone
-             (firmware/)                 (cmd/bridge)     (cmd/server)
+             (firmware/)                 (cmd/bridge)     (cmd/server)     (mobile/)
 ```
 
 ## How detection works
@@ -43,6 +43,26 @@ go run ./cmd/bridge -dog 1 -port /dev/cu.usbserial-110
 Close the Arduino IDE's Serial Monitor first—only one program can hold the port.
 
 Tests: `go test ./...`
+
+## Phone app (`mobile/`)
+
+Expo / React Native. Shows live status, breathing vs. the dog's normal, alert
+history, and receives the push alerts.
+
+```sh
+cd mobile
+npm install
+npx expo start            # scan the QR code with the Expo Go app
+```
+
+- Phone and computer must be on the same WiFi. The server URL is your
+  computer's LAN IP (`ipconfig getifaddr en0`), pre-filled from
+  `mobile/.env.local` (`EXPO_PUBLIC_SERVER_URL=http://<ip>:8090`).
+- **Push notifications** need a free Expo account, once: `npx eas-cli@latest login`
+  then `npx eas-cli@latest init` inside `mobile/` (adds the project ID to `app.json`).
+  On iPhone, Expo Go then receives pushes. On Android, Expo Go can't; use a
+  development build (`npx eas-cli@latest build --profile development --platform android`).
+- Run the server **without** `NOTIFIER=log` to send real pushes.
 
 ## Configuration (server env vars)
 
@@ -81,6 +101,7 @@ internal/store  SQLite: dogs, baselines, alerts, push tokens
 internal/notify Expo push
 internal/api    HTTP handlers
 firmware/       Arduino Nano sketch
+mobile/         Expo phone app
 ```
 
 ## Not done yet
