@@ -39,6 +39,22 @@ export type AlertRecord = {
   tension: number;
 };
 
+// GPS reading from the collar.
+export type Fix = { at: string; lat: number; lon: number; accuracy_m: number };
+
+// Safe zone: a circle around home.
+export type Zone = { lat: number; lon: number; radius_m: number };
+
+export type DogLocation = {
+  dog_id: number;
+  zone: Zone | null;
+  last?: Fix;
+  distance_m?: number; // from home
+  away: boolean;
+  away_since?: string;
+  trail?: Fix[]; // oldest first
+};
+
 export class ApiError extends Error {}
 
 export function createClient(serverUrl: string, apiKey = '') {
@@ -81,6 +97,9 @@ export function createClient(serverUrl: string, apiKey = '') {
     status: (id: number) => request<Status>('GET', `/api/dogs/${id}/status`),
     alerts: (id: number, limit = 20) => request<AlertRecord[]>('GET', `/api/dogs/${id}/alerts?limit=${limit}`),
     recalibrate: (id: number) => request<Status>('POST', `/api/dogs/${id}/calibrate`),
+    location: (id: number, minutes = 30) => request<DogLocation>('GET', `/api/dogs/${id}/location?minutes=${minutes}`),
+    setZone: (id: number, zone: Zone) => request<DogLocation>('PUT', `/api/dogs/${id}/zone`, zone),
+    deleteZone: (id: number) => request<DogLocation>('DELETE', `/api/dogs/${id}/zone`),
     addPushToken: (id: number, token: string) => request<void>('POST', `/api/dogs/${id}/push-tokens`, { token }),
     removePushToken: (token: string) =>
       request<void>('DELETE', `/api/push-tokens/${encodeURIComponent(token)}`),

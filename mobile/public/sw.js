@@ -11,7 +11,7 @@ self.addEventListener('push', (event) => {
       body: msg.body,
       data: msg.data,
       icon: '/icon-192.png',
-      tag: 'canivo-alert', // a new alert replaces the previous one...
+      tag: 'canivo-' + (msg.data?.type === 'alert' ? 'alert' : 'location'), // a new one replaces the previous of its kind...
       renotify: true, // ...but still buzzes again
       vibrate: [300, 100, 300], // Android; iPhone/Watch use their own haptic
     }),

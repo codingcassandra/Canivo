@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codingcassandra/Canivo/internal/geo"
 	"github.com/codingcassandra/Canivo/internal/monitor"
 	"github.com/codingcassandra/Canivo/internal/notify"
 )
@@ -90,5 +91,51 @@ func TestStore(t *testing.T) {
 	s.RemoveWebPush(ctx, sub.Endpoint)
 	if subs, _ := s.WebPushSubs(ctx, d.ID); len(subs) != 0 {
 		t.Fatalf("web subs after remove = %+v", subs)
+	}
+}
+
+func TestZonesAndFixes(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	d, _ := s.CreateDog(ctx, "Rex")
+
+	if z, err := s.Zone(ctx, d.ID); z != nil || err != nil {
+		t.Fatalf("zone before set = %+v %v", z, err)
+	}
+	s.SetZone(ctx, d.ID, &geo.Zone{Lat: 1, Lon: 2, RadiusM: 50})
+	want := geo.Zone{Lat: 40.7, Lon: -74, RadiusM: 120}
+	if err := s.SetZone(ctx, d.ID, &want); err != nil {
+		t.Fatal(err)
+	}
+	if z, err := s.Zone(ctx, d.ID); err != nil || z == nil || *z != want {
+		t.Fatalf("zone = %+v %v", z, err)
+	}
+	s.SetZone(ctx, d.ID, nil)
+	if z, _ := s.Zone(ctx, d.ID); z != nil {
+		t.Fatalf("zone after delete = %+v", z)
+	}
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	fixes := []geo.Fix{
+		{At: now.Add(-48 * time.Hour), Lat: 9, Lon: 9, AccuracyM: 5}, // pruned
+		{At: now.Add(-2 * time.Minute), Lat: 40.70, Lon: -74, AccuracyM: 8},
+		{At: now.Add(-1 * time.Minute), Lat: 40.71, Lon: -74, AccuracyM: 9},
+		{At: now, Lat: 40.72, Lon: -74, AccuracyM: 10},
+	}
+	if err := s.AddFixes(ctx, d.ID, fixes); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Fixes(ctx, d.ID, time.Time{}, 100)
+	if err != nil || len(got) != 3 || !got[0].At.Equal(fixes[1].At) || got[2] != fixes[3] {
+		t.Fatalf("fixes = %+v %v", got, err)
+	}
+	// limit keeps the newest, still oldest first.
+	got, _ = s.Fixes(ctx, d.ID, time.Time{}, 2)
+	if len(got) != 2 || got[0].Lat != 40.71 || got[1].Lat != 40.72 {
+		t.Fatalf("limited fixes = %+v", got)
+	}
+	got, _ = s.Fixes(ctx, d.ID, now.Add(-90*time.Second), 100)
+	if len(got) != 2 {
+		t.Fatalf("since filter = %+v", got)
 	}
 }

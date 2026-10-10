@@ -23,7 +23,13 @@
     },
     "plugins": [
       "expo-notifications",
-      "expo-font"
+      "expo-font",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Canivo uses your location once, to set the safe zone around your home."
+        }
+      ]
     ]
   }
 }

@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AppState, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
-import { AlertRecord, Baseline, createClient, Dog, Status } from './api';
+import { AppState, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { AlertRecord, Baseline, createClient, Dog, DogLocation, Status } from './api';
 import { BreathChart, Point } from './BreathChart';
 import { BreathingRing } from './BreathingRing';
 import { confirm } from './confirm';
+import { LocationCard, openDirections } from './LocationCard';
 import { enablePush } from './push';
 import { PushState } from './pushState';
 import { Settings } from './settings';
 import { colors, fonts, radius, Tone, tones } from './theme';
 import { Button, Card, Icon, IconName, Pill, T } from './ui';
+import { ago, fmtDistance } from './units';
 
 const POLL_MS = 2000;
 const OFFLINE_AFTER_MS = 10000;
 const CHART_WINDOW_MS = 5 * 60 * 1000;
+const LOCATION_POLL_MS = 5000;
 
 type Props = {
   settings: Settings;
@@ -33,13 +36,21 @@ export function DogScreen({ settings, onChangeDog }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [push, setPush] = useState<PushState | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [loc, setLoc] = useState<DogLocation | null>(null);
   const lastState = useRef<string | null>(null);
+  const lastLocPoll = useRef(0);
+
+  const pollLocation = useCallback(async () => {
+    lastLocPoll.current = Date.now();
+    setLoc(await client.location(dogId));
+  }, [client, dogId]);
 
   const refreshAlerts = useCallback(async () => {
     setAlerts(await client.alerts(dogId));
   }, [client, dogId]);
 
   const poll = useCallback(async () => {
+    if (Date.now() - lastLocPoll.current >= LOCATION_POLL_MS) pollLocation().catch(() => {});
     try {
       const s = await client.status(dogId);
       setStatus(s);
@@ -55,7 +66,7 @@ export function DogScreen({ settings, onChangeDog }: Props) {
     } catch (e) {
       setError((e as Error).message);
     }
-  }, [client, dogId, refreshAlerts]);
+  }, [client, dogId, refreshAlerts, pollLocation]);
 
   // Load the dog, then poll status while the app is in the foreground.
   useEffect(() => {
@@ -108,7 +119,7 @@ export function DogScreen({ settings, onChangeDog }: Props) {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await Promise.all([poll(), refreshAlerts().catch(() => {})]);
+    await Promise.all([poll(), pollLocation().catch(() => {}), refreshAlerts().catch(() => {})]);
     setRefreshing(false);
   };
 
@@ -139,6 +150,28 @@ export function DogScreen({ settings, onChangeDog }: Props) {
           <View style={styles.errorBanner}>
             <Icon name="alert-circle" color={colors.error} />
             <T style={{ flex: 1, color: colors.error }}>{error}</T>
+          </View>
+        )}
+
+        {loc?.away && loc.last && (
+          <View style={styles.awayBanner}>
+            <View style={styles.awayTop}>
+              <View style={styles.awayIcon}>
+                <Icon name="run-fast" size={24} color={tones.alert.fg} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <T variant="heading" style={{ color: '#fff' }}>
+                  {name} left home
+                </T>
+                <T style={{ color: '#fff', opacity: 0.92 }}>
+                  {fmtDistance(loc.distance_m ?? 0)} away · left {loc.away_since ? ago(loc.away_since) : 'just now'}
+                </T>
+              </View>
+            </View>
+            <Pressable onPress={() => openDirections(loc.last!)} style={({ pressed }) => [styles.awayButton, pressed && { opacity: 0.85 }]}>
+              <Icon name="directions" color={tones.alert.fg} />
+              <Text style={styles.awayButtonText}>Get directions</Text>
+            </Pressable>
           </View>
         )}
 
@@ -185,6 +218,11 @@ export function DogScreen({ settings, onChangeDog }: Props) {
         </Card>
 
         <Card style={styles.section}>
+          <SectionTitle icon="map-marker-radius" title="Location" />
+          <LocationCard client={client} dogId={dogId} name={name} loc={loc} onChange={setLoc} />
+        </Card>
+
+        <Card style={styles.section}>
           <SectionTitle icon="clock-outline" title="Recent alerts" />
           {alerts.length === 0 ? (
             <View style={styles.emptyRow}>
@@ -204,7 +242,7 @@ export function DogScreen({ settings, onChangeDog }: Props) {
           <SectionTitle icon={push?.status === 'on' ? 'bell-ring' : 'bell-off-outline'} title="Notifications" />
           {push?.status === 'needs-tap' ? (
             <>
-              <T style={{ color: colors.muted }}>Get a buzz on your phone (and Apple Watch) when {name} goes on alert.</T>
+              <T style={{ color: colors.muted }}>Get a buzz on your phone (and Apple Watch) when {name} goes on alert or leaves home.</T>
               <Button title="Turn on alerts" icon="bell-ring" onPress={() => turnOnPush(true)} />
             </>
           ) : (
@@ -212,7 +250,7 @@ export function DogScreen({ settings, onChangeDog }: Props) {
               {push === null
                 ? 'Setting up…'
                 : push.status === 'on'
-                  ? `On. You’ll get a notification when ${name} goes on alert.`
+                  ? `On. You’ll get a notification when ${name} goes on alert or leaves home.`
                   : push.reason}
             </T>
           )}
@@ -416,4 +454,18 @@ const styles = StyleSheet.create({
   alertDivider: { borderBottomWidth: 1, borderBottomColor: colors.border },
   alertDot: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
   footer: { marginTop: 10 },
+  awayBanner: { backgroundColor: tones.alert.fg, borderRadius: radius.md, padding: 16, marginTop: 12 },
+  awayTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  awayIcon: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
+  awayButton: {
+    marginTop: 14,
+    backgroundColor: '#fff',
+    borderRadius: radius.pill,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  awayButtonText: { fontFamily: fonts.bold, fontSize: 17, color: tones.alert.fg },
 });

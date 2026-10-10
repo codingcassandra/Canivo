@@ -2,12 +2,34 @@
 
 Canivo watches a dog's breathing through an EMG sensor and pushes a
 notification to the owner's phone when the dog goes on high alert, so they can
-redirect the dog before it reacts.
+redirect the dog before it reacts. It also watches a GPS collar and alerts the
+owner the moment the dog leaves a safe zone around home.
 
 ```
 EMG sensor → Arduino Nano ──USB serial──▶ bridge ──HTTP──▶ server ──Expo push──▶ owner's phone
              (firmware/)                 (cmd/bridge)     (cmd/server)     (mobile/)
 ```
+
+## Safe zone (GPS)
+
+In the app, under **Location**, stand at home, pick a size and tap **Set home
+here**. The phone's location becomes the center of the safe zone. The collar
+posts GPS fixes to the server. When the dog leaves the zone, the owner gets a
+"Rex left home" push, and the app shows a red banner, a map with the dog's
+trail, and walking directions. Another push follows when the dog is back.
+
+Against GPS jitter, a fix only counts as outside if its whole accuracy circle is
+outside the zone. It takes 2 fixes in a row to change state, and fixes less
+accurate than 100 m are ignored. Fixes are kept for 24 hours.
+
+No collar yet? Simulate one. It plays in the yard, runs off, then comes home:
+
+```sh
+go run ./cmd/gpssim -server https://canivo.onrender.com -dog 1
+```
+
+AirTags can't be used: Apple offers no way for other apps to read their
+location.
 
 ## How detection works
 
@@ -136,8 +158,13 @@ All `/api/*` routes need `Authorization: Bearer <API_KEY>` when the server has o
 | GET | `/api/web-push/key` | `{"public_key":...}` VAPID key for `pushManager.subscribe` |
 | POST | `/api/dogs/{id}/web-push` | a browser `PushSubscription.toJSON()` |
 | POST | `/api/web-push/unsubscribe` | `{"endpoint":...}` |
+| POST | `/api/dogs/{id}/locations` | `{"fixes":[{"t":<unix ms>,"lat":..,"lon":..,"accuracy_m":..}]}` (≤ 500; `t` optional = now) → location |
+| GET | `/api/dogs/{id}/location?minutes=30` | `zone`, `last` fix, `distance_m`, `away`, `away_since`, `trail` |
+| PUT | `/api/dogs/{id}/zone` | `{"lat":..,"lon":..,"radius_m":100}` (20–5000 m) |
+| DELETE | `/api/dogs/{id}/zone` | turn the safe zone off |
 
-Push payload `data`: `{"type":"alert","dog_id":1,"alert_id":7}`.
+Push payload `data`: `{"type":"alert","dog_id":1,"alert_id":7}`, or
+`{"type":"away"|"home","dog_id":1}` for the safe zone.
 
 ## Layout
 
@@ -145,9 +172,11 @@ Push payload `data`: `{"type":"alert","dog_id":1,"alert_id":7}`.
 cmd/server      HTTP server
 cmd/bridge      serial → HTTP forwarder (+ simulator)
 cmd/vapidkeys   generates web push keys
+cmd/gpssim      fake GPS collar for trying the safe zone
 internal/breath breath detection from EMG envelope (+ synthetic signal)
 internal/monitor baseline, arousal score, calm/alert state machine
-internal/store  SQLite: dogs, baselines, alerts, push tokens
+internal/geo    distance + safe-zone fence (left / returned)
+internal/store  SQLite/Postgres: dogs, baselines, alerts, zones, GPS fixes, push tokens
 internal/notify Expo push + Web Push
 internal/api    HTTP handlers
 firmware/       Arduino Nano sketch
@@ -158,5 +187,6 @@ mobile/         Expo app: iOS/Android + web (Vercel)
 
 - **Accounts** – one shared API key protects the server, but everyone with it sees every dog. Add owner accounts before real users.
 - **Wireless** – the Nano R3 has no radio. Options: HC-05/HM-10 Bluetooth module → phone, or swap to an ESP32 / Nano 33 IoT / Nano ESP32 that posts directly.
+- **GPS collar hardware** – the server and app are ready, but no collar firmware yet. A dog that runs away is out of Wi-Fi range, so the collar needs cellular (e.g. an ESP32 board with a SIM7000G/SIM7080G LTE-M + GNSS modem and a data SIM). It just POSTs to `/api/dogs/{id}/locations` every few seconds.
 - **Tuning on a real dog** – thresholds come from synthetic data. Exercise, heat-panting and barking also change breathing; expect to tune `monitor.DefaultConfig()`.
 - Live state is in memory, so the server runs as a single instance.

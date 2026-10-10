@@ -1,5 +1,5 @@
-// Package store persists dogs, their baselines, alerts and owners' push
-// tokens in SQLite (local dev) or Postgres (deployed). Raw sensor samples are
+// Package store persists dogs, their baselines, alerts, safe zones, recent
+// GPS fixes and owners' push tokens in SQLite (local dev) or Postgres (deployed). Raw sensor samples are
 // not stored. Queries use $N placeholders, which both databases accept.
 package store
 
@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codingcassandra/Canivo/internal/geo"
 	"github.com/codingcassandra/Canivo/internal/monitor"
 	"github.com/codingcassandra/Canivo/internal/notify"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -69,7 +70,22 @@ CREATE TABLE IF NOT EXISTS web_push_subs (
 	auth       TEXT NOT NULL,
 	created_at TEXT NOT NULL,
 	PRIMARY KEY (endpoint, dog_id)
-);`
+);
+CREATE TABLE IF NOT EXISTS zones (
+	dog_id   BIGINT PRIMARY KEY REFERENCES dogs(id) ON DELETE CASCADE,
+	lat      {{FLOAT}} NOT NULL,
+	lon      {{FLOAT}} NOT NULL,
+	radius_m {{FLOAT}} NOT NULL
+);
+CREATE TABLE IF NOT EXISTS locations (
+	id         {{ID}},
+	dog_id     BIGINT NOT NULL REFERENCES dogs(id) ON DELETE CASCADE,
+	at_ms      BIGINT NOT NULL,
+	lat        {{FLOAT}} NOT NULL,
+	lon        {{FLOAT}} NOT NULL,
+	accuracy_m {{FLOAT}} NOT NULL
+);
+CREATE INDEX IF NOT EXISTS locations_dog ON locations(dog_id, at_ms);`
 
 // pgLockdown enables row-level security with no policies. On Supabase this
 // stops the auto-generated public REST API (anon key) from reading the
@@ -78,7 +94,9 @@ const pgLockdown = `
 ALTER TABLE dogs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE alerts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE push_tokens ENABLE ROW LEVEL SECURITY;
-ALTER TABLE web_push_subs ENABLE ROW LEVEL SECURITY;`
+ALTER TABLE web_push_subs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE zones ENABLE ROW LEVEL SECURITY;
+ALTER TABLE locations ENABLE ROW LEVEL SECURITY;`
 
 // Open opens (and migrates) a database. dsn is either a Postgres URL
 // ("postgres://...") or a SQLite file path (":memory:" in tests).
@@ -255,6 +273,84 @@ func (s *Store) WebPushSubs(ctx context.Context, dogID int64) ([]notify.WebSubsc
 func (s *Store) RemoveWebPush(ctx context.Context, endpoint string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM web_push_subs WHERE endpoint = $1`, endpoint)
 	return err
+}
+
+// Zone returns the dog's safe zone, or nil if none is set.
+func (s *Store) Zone(ctx context.Context, dogID int64) (*geo.Zone, error) {
+	var z geo.Zone
+	err := s.db.QueryRowContext(ctx, `SELECT lat, lon, radius_m FROM zones WHERE dog_id = $1`, dogID).
+		Scan(&z.Lat, &z.Lon, &z.RadiusM)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &z, nil
+}
+
+// SetZone sets or, with nil, removes the dog's safe zone.
+func (s *Store) SetZone(ctx context.Context, dogID int64, z *geo.Zone) error {
+	if z == nil {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM zones WHERE dog_id = $1`, dogID)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO zones(dog_id, lat, lon, radius_m) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (dog_id) DO UPDATE SET lat = excluded.lat, lon = excluded.lon, radius_m = excluded.radius_m`,
+		dogID, z.Lat, z.Lon, z.RadiusM)
+	return err
+}
+
+// keepFixes is how long GPS history is kept.
+const keepFixes = 24 * time.Hour
+
+// AddFixes saves GPS fixes and drops the dog's fixes older than a day.
+func (s *Store) AddFixes(ctx context.Context, dogID int64, fixes []geo.Fix) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, f := range fixes {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO locations(dog_id, at_ms, lat, lon, accuracy_m) VALUES ($1, $2, $3, $4, $5)`,
+			dogID, f.At.UnixMilli(), f.Lat, f.Lon, f.AccuracyM); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM locations WHERE dog_id = $1 AND at_ms < $2`,
+		dogID, time.Now().Add(-keepFixes).UnixMilli()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Fixes returns the dog's fixes since a time, oldest first, at most limit
+// (the most recent ones).
+func (s *Store) Fixes(ctx context.Context, dogID int64, since time.Time, limit int) ([]geo.Fix, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT at_ms, lat, lon, accuracy_m FROM locations
+		 WHERE dog_id = $1 AND at_ms >= $2 ORDER BY at_ms DESC, id DESC LIMIT $3`,
+		dogID, since.UnixMilli(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	fixes := []geo.Fix{}
+	for rows.Next() {
+		var f geo.Fix
+		var ms int64
+		if err := rows.Scan(&ms, &f.Lat, &f.Lon, &f.AccuracyM); err != nil {
+			return nil, err
+		}
+		f.At = time.UnixMilli(ms).UTC()
+		fixes = append(fixes, f)
+	}
+	for i, j := 0, len(fixes)-1; i < j; i, j = i+1, j-1 {
+		fixes[i], fixes[j] = fixes[j], fixes[i]
+	}
+	return fixes, rows.Err()
 }
 
 type scanner interface{ Scan(...any) error }

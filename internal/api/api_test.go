@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -287,5 +288,119 @@ func TestCORS(t *testing.T) {
 		if rec.Code != 200 || rec.Header().Get("Access-Control-Allow-Origin") != want {
 			t.Errorf("%s: %d allow=%q", origin, rec.Code, rec.Header().Get("Access-Control-Allow-Origin"))
 		}
+	}
+}
+
+func TestSafeZone(t *testing.T) {
+	h, n := setup(t)
+	do(t, h, "POST", "/api/dogs", `{"name":"Rex"}`, nil)
+	do(t, h, "POST", "/api/dogs/1/push-tokens", `{"token":"ExponentPushToken[a]"}`, nil)
+
+	// Fixes before a zone exists are stored but never alert.
+	at := time.Now().Add(-10 * time.Minute).UnixMilli()
+	fix := func(northM, acc float64) string {
+		at += 10000
+		return fmt.Sprintf(`{"fixes":[{"t":%d,"lat":%f,"lon":-74,"accuracy_m":%f}]}`, at, 40.7+northM/111195, acc)
+	}
+	var loc locationResponse
+	if code := do(t, h, "POST", "/api/dogs/1/locations", fix(5000, 5), &loc); code != 200 || loc.Zone != nil || loc.Last == nil {
+		t.Fatalf("no-zone fix: %d %+v", code, loc)
+	}
+
+	for _, c := range []struct{ body string }{
+		{`{"lat":40.7,"lon":-74,"radius_m":5}`},
+		{`{"lat":91,"lon":-74,"radius_m":100}`},
+		{`{"lat":0,"lon":0,"radius_m":100}`},
+	} {
+		if code := do(t, h, "PUT", "/api/dogs/1/zone", c.body, nil); code != 400 {
+			t.Errorf("zone %s: %d", c.body, code)
+		}
+	}
+	if code := do(t, h, "PUT", "/api/dogs/1/zone", `{"lat":40.7,"lon":-74,"radius_m":100}`, &loc); code != 200 || loc.Zone == nil || loc.Zone.RadiusM != 100 {
+		t.Fatalf("set zone: %d %+v", code, loc)
+	}
+
+	// Playing in the yard, then one stray fix outside: nothing.
+	for _, m := range []float64{10, 60, 400, 30} {
+		do(t, h, "POST", "/api/dogs/1/locations", fix(m, 10), &loc)
+		if loc.Away {
+			t.Fatalf("away after %v m", m)
+		}
+	}
+	// Runs off.
+	do(t, h, "POST", "/api/dogs/1/locations", fix(250, 10), nil)
+	do(t, h, "POST", "/api/dogs/1/locations", fix(400, 10), &loc)
+	if !loc.Away || loc.AwaySince == nil || loc.DistanceM == nil || *loc.DistanceM < 390 || *loc.DistanceM > 410 {
+		t.Fatalf("after running off: %+v", loc)
+	}
+	select {
+	case s := <-n:
+		if s.msg.Title != "Rex left home" || s.msg.Data["type"] != "away" {
+			t.Errorf("away push = %+v", s.msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no away push")
+	}
+
+	// A late fix from earlier (inside the zone) doesn't count as coming home.
+	late := fmt.Sprintf(`{"fixes":[{"t":%d,"lat":40.7,"lon":-74,"accuracy_m":5},{"t":%d,"lat":40.7,"lon":-74,"accuracy_m":5}]}`, at-60000, at-50000)
+	do(t, h, "POST", "/api/dogs/1/locations", late, &loc)
+	if !loc.Away {
+		t.Fatal("late fixes brought the dog home")
+	}
+
+	// Comes back: a batch of two fixes inside.
+	at += 10000
+	back := fmt.Sprintf(`{"fixes":[{"t":%d,"lat":40.7003,"lon":-74,"accuracy_m":8},{"lat":40.7001,"lon":-74,"accuracy_m":8}]}`, at)
+	do(t, h, "POST", "/api/dogs/1/locations", back, &loc)
+	if loc.Away {
+		t.Fatalf("still away: %+v", loc)
+	}
+	select {
+	case s := <-n:
+		if s.msg.Title != "Rex is back home" {
+			t.Errorf("home push = %+v", s.msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no back-home push")
+	}
+
+	// Trail: all fixes from the last 30 minutes, oldest first.
+	do(t, h, "GET", "/api/dogs/1/location", "", &loc)
+	if len(loc.Trail) != 11 || loc.Trail[0].At.After(loc.Trail[1].At) || loc.Last == nil {
+		t.Fatalf("trail = %d fixes, last %+v", len(loc.Trail), loc.Last)
+	}
+	if code := do(t, h, "GET", "/api/dogs/1/location?minutes=0", "", nil); code != 400 {
+		t.Errorf("minutes=0: %d", code)
+	}
+
+	// Removing the zone.
+	if do(t, h, "DELETE", "/api/dogs/1/zone", "", &loc); loc.Zone != nil || loc.Away {
+		t.Fatalf("after delete: %+v", loc)
+	}
+}
+
+func TestLocationErrors(t *testing.T) {
+	h, _ := setup(t)
+	do(t, h, "POST", "/api/dogs", `{"name":"Rex"}`, nil)
+	future := time.Now().Add(time.Hour).UnixMilli()
+	for _, c := range []struct {
+		path, body string
+		want       int
+	}{
+		{"/api/dogs/1/locations", `{"fixes":[]}`, 400},
+		{"/api/dogs/1/locations", `{"fixes":[{"lon":-74}]}`, 400},
+		{"/api/dogs/1/locations", `{"fixes":[{"lat":40.7,"lon":-200}]}`, 400},
+		{"/api/dogs/1/locations", `{"fixes":[{"lat":40.7,"lon":-74,"accuracy_m":-1}]}`, 400},
+		{"/api/dogs/1/locations", fmt.Sprintf(`{"fixes":[{"t":%d,"lat":40.7,"lon":-74}]}`, future), 400},
+		{"/api/dogs/9/locations", `{"fixes":[{"lat":40.7,"lon":-74}]}`, 404},
+		{"/api/dogs/1/locations", `{"fixes":[{"lat":40.7,"lon":-74}]}`, 200},
+	} {
+		if code := do(t, h, "POST", c.path, c.body, nil); code != c.want {
+			t.Errorf("%s %s: %d, want %d", c.path, c.body, code, c.want)
+		}
+	}
+	if code := do(t, h, "GET", "/api/dogs/9/location", "", nil); code != 404 {
+		t.Errorf("missing dog location: %d", code)
 	}
 }
