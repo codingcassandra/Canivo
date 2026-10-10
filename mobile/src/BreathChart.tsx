@@ -36,7 +36,7 @@ export function BreathChart({ points, baseline, windowMs }: Props) {
     <View>
       <View style={styles.legend}>
         <LegendItem color={colors.primary} label="breaths / min" />
-        {baseline ? <LegendItem color={tones.calm.fg} label={`usual ${Math.round(baseline)}`} dashed /> : null}
+        {baseline ? <LegendItem color={colors.accentDeep} label={`usual ${Math.round(baseline)}`} dashed /> : null}
         {points.some((p) => p.state === 'alert') ? <LegendItem color={tones.alert.glow} label="alert" block /> : null}
       </View>
       <View onLayout={(e) => setWidth(e.nativeEvent.layout.width)}>
@@ -54,7 +54,7 @@ export function BreathChart({ points, baseline, windowMs }: Props) {
             ))}
 
             {baseline ? (
-              <Line x1={0} x2={width} y1={y(baseline)} y2={y(baseline)} stroke={tones.calm.fg} strokeWidth={1.5} strokeDasharray="5 6" />
+              <Line x1={0} x2={width} y1={y(baseline)} y2={y(baseline)} stroke={colors.accentDeep} strokeWidth={1.5} strokeDasharray="5 6" />
             ) : null}
 
             {area ? <Path d={area} fill="url(#fill)" /> : null}

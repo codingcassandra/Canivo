@@ -163,7 +163,7 @@ export function DogScreen({ settings, onChangeDog }: Props) {
             />
             <Metric
               icon="arm-flex"
-              tint={{ ...tones.calibrating }}
+              tint={{ ...tones.calibrating, fg: colors.accentDeep, soft: colors.accentSoft }}
               label="Tension"
               value={signedPct(status.tension, baseline.tension_mean)}
               sub="vs normal"
@@ -327,7 +327,9 @@ function Metric({
 function SectionTitle({ icon, title }: { icon: IconName; title: string }) {
   return (
     <View style={styles.sectionTitle}>
-      <Icon name={icon} size={20} color={colors.primary} />
+      <View style={styles.sectionIcon}>
+        <Icon name={icon} size={17} color={colors.primary} />
+      </View>
       <T variant="heading">{title}</T>
     </View>
   );
@@ -400,6 +402,14 @@ const styles = StyleSheet.create({
   metricIcon: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
   metricValue: { fontFamily: fonts.black, fontSize: 26, color: colors.text, fontVariant: ['tabular-nums'] },
   section: { marginTop: 14 },
+  sectionIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: colors.accentSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   sectionTitle: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 },
   emptyRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   alertRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
