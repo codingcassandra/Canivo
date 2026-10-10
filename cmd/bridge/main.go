@@ -5,6 +5,9 @@
 //	go run ./cmd/bridge -dog 1 -port /dev/cu.usbserial-110
 //	go run ./cmd/bridge -dog 1 -simulate        # no hardware needed
 //
+// For a deployed server, pass -server https://... and the API key via -key or
+// the CANIVO_API_KEY environment variable.
+//
 // Serial format (one line per sample, 115200 baud): "<millis>,<value>".
 // Lines starting with '#' are logged and otherwise ignored.
 package main
@@ -18,6 +21,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +33,7 @@ import (
 func main() {
 	server := flag.String("server", "http://localhost:8090", "Canivo server URL")
 	dog := flag.Int64("dog", 0, "dog id to send samples for (required)")
+	key := flag.String("key", os.Getenv("CANIVO_API_KEY"), "server API key (default $CANIVO_API_KEY)")
 	port := flag.String("port", "", "serial port, e.g. /dev/cu.usbserial-110 (see -list)")
 	baud := flag.Int("baud", 115200, "serial baud rate; must match the sketch")
 	list := flag.Bool("list", false, "list serial ports and exit")
@@ -67,7 +72,7 @@ func main() {
 		log.Fatal("pass -port (or -simulate); use -list to see ports")
 	}
 
-	forward(fmt.Sprintf("%s/api/dogs/%d/samples", strings.TrimRight(*server, "/"), *dog), samples)
+	forward(fmt.Sprintf("%s/api/dogs/%d/samples", strings.TrimRight(*server, "/"), *dog), *key, samples)
 }
 
 // readSerial parses "millis,value" lines into samples.
@@ -134,7 +139,7 @@ func runSimulator(out chan<- breath.Sample, calm, every time.Duration) {
 }
 
 // forward batches samples once a second and POSTs them, printing state changes.
-func forward(url string, in <-chan breath.Sample) {
+func forward(url, key string, in <-chan breath.Sample) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
@@ -148,7 +153,7 @@ func forward(url string, in <-chan breath.Sample) {
 			if len(batch) == 0 {
 				continue
 			}
-			status, err := post(client, url, batch)
+			status, err := post(client, url, key, batch)
 			if err != nil {
 				log.Printf("send: %v (keeping %d samples)", err, len(batch))
 				if len(batch) > 50*60 { // don't grow forever while the server is down
@@ -175,13 +180,21 @@ type status struct {
 	Calibration float64 `json:"calibration_progress"`
 }
 
-func post(c *http.Client, url string, batch []breath.Sample) (status, error) {
+func post(c *http.Client, url, key string, batch []breath.Sample) (status, error) {
 	var st status
 	body, err := json.Marshal(map[string]any{"samples": batch})
 	if err != nil {
 		return st, err
 	}
-	resp, err := c.Post(url, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return st, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := c.Do(req)
 	if err != nil {
 		return st, err
 	}

@@ -57,7 +57,9 @@ npx expo start            # scan the QR code with the Expo Go app
 
 - Phone and computer must be on the same WiFi. The server URL is your
   computer's LAN IP (`ipconfig getifaddr en0`), pre-filled from
-  `mobile/.env.local` (`EXPO_PUBLIC_SERVER_URL=http://<ip>:8090`).
+  `mobile/.env.local` (`EXPO_PUBLIC_SERVER_URL=http://<ip>:8090`). Type the API
+  key on the setup screen. Don't set `EXPO_PUBLIC_API_KEY` for builds you share:
+  `EXPO_PUBLIC_*` values are embedded in the app.
 - **Push notifications** need a free Expo account, once: `npx eas-cli@latest login`
   then `npx eas-cli@latest init` inside `mobile/` (adds the project ID to `app.json`).
   On iPhone, Expo Go then receives pushes. On Android, Expo Go can't; use a
@@ -69,12 +71,36 @@ npx expo start            # scan the QR code with the Expo Go app
 | Var | Default | |
 |---|---|---|
 | `PORT` | `8090` | |
+| `API_KEY` | – | clients send `Authorization: Bearer <key>`; unset = no auth (local only) |
+| `DATABASE_URL` | – | Postgres URL; unset = SQLite at `DB_PATH` |
 | `DB_PATH` | `canivo.db` | SQLite file |
 | `NOTIFIER` | `expo` | `log` to print instead of sending |
 | `EXPO_ACCESS_TOKEN` | – | only if Expo push security is on |
 | `PUSH_COOLDOWN` | `2m` | min time between pushes per dog |
 
+## Deploy (Render + Supabase)
+
+The server keeps live detection state in memory, so it needs an always-running
+host (not serverless like Vercel).
+
+1. **Database:** create a free project at supabase.com. Click **Connect** and
+   copy the **Session pooler** connection string (Render can't reach Supabase's
+   IPv6-only direct connection). Put in your DB password; URL-encode special
+   characters (e.g. `@` → `%40`). The server creates its tables on startup.
+2. **Server:** in Render, **New → Blueprint**, pick this repo. It reads
+   `render.yaml`. Paste the connection string for `DATABASE_URL` when asked.
+3. Copy the generated `API_KEY` from the service's **Environment** tab and check
+   `https://<your-service>.onrender.com/health`.
+4. **Bridge:** `go run ./cmd/bridge -server https://<your-service>.onrender.com -key <API_KEY> -dog 1 -simulate`
+5. **App:** enter the Render URL and API key on the setup screen.
+
+Free tier notes: Render sleeps after 15 min with no requests (a running bridge
+keeps it awake; waking takes ~30 s). Supabase pauses a project after a week of
+no database activity.
+
 ## API
+
+All `/api/*` routes need `Authorization: Bearer <API_KEY>` when the server has one.
 
 | Method | Path | Body / notes |
 |---|---|---|
@@ -106,7 +132,7 @@ mobile/         Expo phone app
 
 ## Not done yet
 
-- **Auth** – any client can read/write any dog. Add owner accounts and a per-device ingest key before deploying publicly.
+- **Accounts** – one shared API key protects the server, but everyone with it sees every dog. Add owner accounts before real users.
 - **Wireless** – the Nano R3 has no radio. Options: HC-05/HM-10 Bluetooth module → phone, or swap to an ESP32 / Nano 33 IoT / Nano ESP32 that posts directly.
 - **Tuning on a real dog** – thresholds come from synthetic data. Exercise, heat-panting and barking also change breathing; expect to tune `monitor.DefaultConfig()`.
 - Live state is in memory, so the server runs as a single instance.

@@ -41,7 +41,7 @@ export type AlertRecord = {
 
 export class ApiError extends Error {}
 
-export function createClient(serverUrl: string) {
+export function createClient(serverUrl: string, apiKey = '') {
   const base = serverUrl.replace(/\/+$/, '');
 
   async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -51,7 +51,10 @@ export function createClient(serverUrl: string) {
     try {
       res = await fetch(base + path, {
         method,
-        headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+        headers: {
+          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal,
       });

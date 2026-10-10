@@ -1,0 +1,14 @@
+# Render Blueprint: New > Blueprint in the Render dashboard, pick this repo.
+services:
+  - type: web
+    name: canivo
+    runtime: go
+    plan: free
+    buildCommand: go build -o bin/server ./cmd/server
+    startCommand: ./bin/server
+    healthCheckPath: /health
+    envVars:
+      - key: API_KEY
+        generateValue: true # Render creates a random secret; copy it from the Environment tab
+      - key: DATABASE_URL
+        sync: false # paste your Supabase connection string when prompted

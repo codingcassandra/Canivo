@@ -4,12 +4,14 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +28,7 @@ type Server struct {
 	notifier     notify.Notifier
 	cfg          monitor.Config
 	pushCooldown time.Duration
+	apiKey       string
 	now          func() time.Time
 
 	mu   sync.Mutex
@@ -42,12 +45,15 @@ type dogRuntime struct {
 	lastSeen  time.Time
 }
 
-func New(st *store.Store, n notify.Notifier, cfg monitor.Config, pushCooldown time.Duration) *Server {
+// New creates the API. If apiKey is non-empty, every /api request must send
+// "Authorization: Bearer <apiKey>".
+func New(st *store.Store, n notify.Notifier, cfg monitor.Config, pushCooldown time.Duration, apiKey string) *Server {
 	return &Server{
 		store:        st,
 		notifier:     n,
 		cfg:          cfg,
 		pushCooldown: pushCooldown,
+		apiKey:       apiKey,
 		now:          time.Now,
 		dogs:         map[int64]*dogRuntime{},
 	}
@@ -67,7 +73,22 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/dogs/{id}/alerts", s.alerts)
 	mux.HandleFunc("POST /api/dogs/{id}/push-tokens", s.addPushToken)
 	mux.HandleFunc("DELETE /api/push-tokens/{token}", s.removePushToken)
-	return mux
+	return s.requireKey(mux)
+}
+
+func (s *Server) requireKey(next http.Handler) http.Handler {
+	if s.apiKey == "" {
+		return next
+	}
+	want := []byte("Bearer " + s.apiKey)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") &&
+			subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), want) != 1 {
+			writeError(w, http.StatusUnauthorized, "missing or wrong API key")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) createDog(w http.ResponseWriter, r *http.Request) {

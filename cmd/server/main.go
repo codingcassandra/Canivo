@@ -3,6 +3,9 @@
 // Environment:
 //
 //	PORT               listen port (default 8090)
+//	API_KEY            secret clients must send as "Authorization: Bearer <key>";
+//	                   unset = no auth (local dev only)
+//	DATABASE_URL       Postgres URL; if unset, uses SQLite at DB_PATH
 //	DB_PATH            SQLite file (default canivo.db)
 //	NOTIFIER           "expo" (default) or "log" to print pushes instead of sending
 //	EXPO_ACCESS_TOKEN  optional, only if Expo push security is enabled
@@ -32,7 +35,11 @@ func main() {
 		log.Fatalf("PUSH_COOLDOWN: %v", err)
 	}
 
-	st, err := store.Open(env("DB_PATH", "canivo.db"))
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = env("DB_PATH", "canivo.db")
+	}
+	st, err := store.Open(dsn)
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
@@ -42,6 +49,11 @@ func main() {
 		log.Fatalf("close stale alerts: %v", err)
 	}
 
+	apiKey := os.Getenv("API_KEY")
+	if apiKey == "" {
+		log.Print("WARNING: API_KEY not set; anyone who can reach this server can use it")
+	}
+
 	var n notify.Notifier = &notify.Expo{AccessToken: os.Getenv("EXPO_ACCESS_TOKEN")}
 	if env("NOTIFIER", "expo") == "log" {
 		n = notify.Log{}
@@ -49,7 +61,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           api.New(st, n, monitor.DefaultConfig(), cooldown).Handler(),
+		Handler:           api.New(st, n, monitor.DefaultConfig(), cooldown, apiKey).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,

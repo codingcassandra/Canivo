@@ -38,7 +38,37 @@ func setup(t *testing.T) (http.Handler, fakeNotifier) {
 	cfg := monitor.DefaultConfig()
 	cfg.Calibration = 30 * time.Second
 	n := make(fakeNotifier, 10)
-	return New(st, n, cfg, 2*time.Minute).Handler(), n
+	return New(st, n, cfg, 2*time.Minute, "").Handler(), n
+}
+
+func TestAPIKey(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	h := New(st, notify.Log{}, monitor.DefaultConfig(), time.Minute, "s3cret").Handler()
+
+	for _, c := range []struct {
+		path, auth string
+		want       int
+	}{
+		{"/health", "", 200},
+		{"/api/dogs", "", 401},
+		{"/api/dogs", "Bearer wrong", 401},
+		{"/api/dogs", "s3cret", 401},
+		{"/api/dogs", "Bearer s3cret", 200},
+	} {
+		req := httptest.NewRequest("GET", c.path, nil)
+		if c.auth != "" {
+			req.Header.Set("Authorization", c.auth)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != c.want {
+			t.Errorf("%s auth=%q: %d, want %d", c.path, c.auth, rec.Code, c.want)
+		}
+	}
 }
 
 func do(t *testing.T, h http.Handler, method, path, body string, out any) int {

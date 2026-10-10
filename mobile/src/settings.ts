@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export type Settings = {
   serverUrl: string;
+  apiKey: string;
   dogId: number;
 };
 

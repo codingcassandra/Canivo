@@ -15,7 +15,10 @@ type Props = {
 };
 
 export function DogScreen({ settings, onChangeDog }: Props) {
-  const client = useMemo(() => createClient(settings.serverUrl), [settings.serverUrl]);
+  const client = useMemo(
+    () => createClient(settings.serverUrl, settings.apiKey),
+    [settings.serverUrl, settings.apiKey],
+  );
   const { dogId } = settings;
 
   const [dog, setDog] = useState<Dog | null>(null);

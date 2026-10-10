@@ -16,12 +16,14 @@ import { colors } from './theme';
 
 type Props = {
   initialUrl: string;
+  initialKey: string;
   onDone: (s: Settings) => void;
 };
 
 // Connect to the server, then pick an existing dog or add a new one.
-export function SetupScreen({ initialUrl, onDone }: Props) {
+export function SetupScreen({ initialUrl, initialKey, onDone }: Props) {
   const [url, setUrl] = useState(initialUrl);
+  const [apiKey, setApiKey] = useState(initialKey);
   const [dogs, setDogs] = useState<Dog[] | null>(null);
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -41,13 +43,13 @@ export function SetupScreen({ initialUrl, onDone }: Props) {
 
   const connect = () =>
     run(async () => {
-      setDogs(await createClient(url.trim()).listDogs());
+      setDogs(await createClient(url.trim(), apiKey.trim()).listDogs());
     });
 
   const addDog = () =>
     run(async () => {
-      const dog = await createClient(url.trim()).createDog(name.trim());
-      onDone({ serverUrl: url.trim(), dogId: dog.id });
+      const dog = await createClient(url.trim(), apiKey.trim()).createDog(name.trim());
+      onDone({ serverUrl: url.trim(), apiKey: apiKey.trim(), dogId: dog.id });
     });
 
   return (
@@ -69,7 +71,23 @@ export function SetupScreen({ initialUrl, onDone }: Props) {
           keyboardType="url"
           placeholder="http://192.168.1.20:8090"
         />
-        <Text style={styles.hint}>Your computer's local IP, not localhost: the phone is a different device.</Text>
+        <Text style={styles.hint}>
+          Your deployed server, or your computer's local IP (not localhost: the phone is a different device).
+        </Text>
+
+        <Text style={styles.label}>API key</Text>
+        <TextInput
+          style={styles.input}
+          value={apiKey}
+          onChangeText={(t) => {
+            setApiKey(t);
+            setDogs(null);
+          }}
+          autoCapitalize="none"
+          autoCorrect={false}
+          secureTextEntry
+          placeholder="Leave blank for a local server"
+        />
         <Button title="Connect" onPress={connect} disabled={busy || !url.trim()} />
 
         {busy && <ActivityIndicator style={{ marginTop: 16 }} />}
@@ -82,7 +100,7 @@ export function SetupScreen({ initialUrl, onDone }: Props) {
               <Pressable
                 key={d.id}
                 style={({ pressed }) => [styles.dogRow, pressed && { opacity: 0.6 }]}
-                onPress={() => onDone({ serverUrl: url.trim(), dogId: d.id })}
+                onPress={() => onDone({ serverUrl: url.trim(), apiKey: apiKey.trim(), dogId: d.id })}
               >
                 <Text style={styles.dogName}>{d.name}</Text>
                 <Text style={styles.muted}>{d.baseline ? 'Calibrated' : 'Not calibrated'}</Text>
