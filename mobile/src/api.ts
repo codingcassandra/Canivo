@@ -42,7 +42,9 @@ export type AlertRecord = {
 export class ApiError extends Error {}
 
 export function createClient(serverUrl: string, apiKey = '') {
-  const base = serverUrl.replace(/\/+$/, '');
+  // Accept "canivo.onrender.com" as well as the full "https://..." URL.
+  const withScheme = /^https?:\/\//i.test(serverUrl) ? serverUrl : `https://${serverUrl}`;
+  const base = withScheme.replace(/\/+$/, '');
 
   async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const controller = new AbortController();
@@ -59,7 +61,9 @@ export function createClient(serverUrl: string, apiKey = '') {
         signal: controller.signal,
       });
     } catch {
-      throw new ApiError(`Can't reach the server at ${base}`);
+      throw new ApiError(
+        `Can't reach the server at ${base}. If it's on Render's free plan it may be waking up; try again in 30 seconds.`,
+      );
     } finally {
       clearTimeout(timer);
     }

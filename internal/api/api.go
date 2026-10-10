@@ -73,6 +73,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"service": "canivo API",
+			"status":  "ok",
+			"note":    "This is the server. Open the Canivo web app to see your dog.",
+		})
+	})
 	mux.HandleFunc("POST /api/dogs", s.createDog)
 	mux.HandleFunc("GET /api/dogs", s.listDogs)
 	mux.HandleFunc("GET /api/dogs/{id}", s.getDog)
