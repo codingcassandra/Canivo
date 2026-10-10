@@ -24,12 +24,11 @@ import (
 const maxSamplesPerRequest = 5000
 
 type Server struct {
-	store        *store.Store
-	notifier     notify.Notifier
-	cfg          monitor.Config
-	pushCooldown time.Duration
-	apiKey       string
-	now          func() time.Time
+	store    *store.Store
+	notifier notify.Notifier
+	cfg      monitor.Config
+	opts     Options
+	now      func() time.Time
 
 	mu   sync.Mutex
 	dogs map[int64]*dogRuntime
@@ -45,17 +44,27 @@ type dogRuntime struct {
 	lastSeen  time.Time
 }
 
-// New creates the API. If apiKey is non-empty, every /api request must send
-// "Authorization: Bearer <apiKey>".
-func New(st *store.Store, n notify.Notifier, cfg monitor.Config, pushCooldown time.Duration, apiKey string) *Server {
+type Options struct {
+	PushCooldown time.Duration // min time between pushes per dog
+	// APIKey, if set, must be sent by every /api request as
+	// "Authorization: Bearer <APIKey>".
+	APIKey string
+	// WebPush and VAPIDPublicKey enable browser push. Nil disables it.
+	WebPush        notify.WebPusher
+	VAPIDPublicKey string
+	// AllowedOrigins are web app origins (e.g. "https://canivo.vercel.app")
+	// allowed to call the API from a browser. "*" allows any.
+	AllowedOrigins []string
+}
+
+func New(st *store.Store, n notify.Notifier, cfg monitor.Config, opts Options) *Server {
 	return &Server{
-		store:        st,
-		notifier:     n,
-		cfg:          cfg,
-		pushCooldown: pushCooldown,
-		apiKey:       apiKey,
-		now:          time.Now,
-		dogs:         map[int64]*dogRuntime{},
+		store:    st,
+		notifier: n,
+		cfg:      cfg,
+		opts:     opts,
+		now:      time.Now,
+		dogs:     map[int64]*dogRuntime{},
 	}
 }
 
@@ -73,14 +82,46 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/dogs/{id}/alerts", s.alerts)
 	mux.HandleFunc("POST /api/dogs/{id}/push-tokens", s.addPushToken)
 	mux.HandleFunc("DELETE /api/push-tokens/{token}", s.removePushToken)
-	return s.requireKey(mux)
+	mux.HandleFunc("GET /api/web-push/key", s.webPushKey)
+	mux.HandleFunc("POST /api/dogs/{id}/web-push", s.addWebPush)
+	mux.HandleFunc("POST /api/web-push/unsubscribe", s.removeWebPush)
+	return s.cors(s.requireKey(mux))
+}
+
+// cors lets the web app, hosted on another domain, call the API. Preflight
+// requests are answered here, before the API key check (browsers send them
+// without credentials).
+func (s *Server) cors(next http.Handler) http.Handler {
+	allowed := map[string]bool{}
+	for _, o := range s.opts.AllowedOrigins {
+		allowed[strings.TrimRight(o, "/")] = true
+	}
+	if len(allowed) == 0 {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" && (allowed["*"] || allowed[origin]) {
+			h := w.Header()
+			h.Set("Access-Control-Allow-Origin", origin)
+			h.Add("Vary", "Origin")
+			if r.Method == http.MethodOptions {
+				h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE")
+				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+				h.Set("Access-Control-Max-Age", "86400")
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) requireKey(next http.Handler) http.Handler {
-	if s.apiKey == "" {
+	if s.opts.APIKey == "" {
 		return next
 	}
-	want := []byte("Bearer " + s.apiKey)
+	want := []byte("Bearer " + s.opts.APIKey)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") &&
 			subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), want) != 1 {
@@ -200,7 +241,7 @@ func (s *Server) handleEvent(ctx context.Context, dogID int64, rt *dogRuntime, e
 		}
 		rt.openAlert = alertID
 		log.Printf("dog %d: ALERT %d score=%.1f rate=%.0f", dogID, alertID, ev.Score, ev.RateBPM)
-		if now.Sub(rt.lastPush) >= s.pushCooldown {
+		if now.Sub(rt.lastPush) >= s.opts.PushCooldown {
 			rt.lastPush = now
 			go s.push(dogID, alertID, rt.name, ev, *rt.mon.Baseline())
 		}
@@ -221,23 +262,40 @@ func (s *Server) handleEvent(ctx context.Context, dogID int64, rt *dogRuntime, e
 func (s *Server) push(dogID, alertID int64, name string, ev monitor.Event, b monitor.Baseline) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	tokens, err := s.store.PushTokens(ctx, dogID)
-	if err != nil {
-		log.Printf("dog %d: load push tokens: %v", dogID, err)
-		return
-	}
 	msg := notify.Message{
 		Title: name + " is on high alert",
 		Body:  alertBody(name, ev, b),
 		Data:  map[string]any{"type": "alert", "dog_id": dogID, "alert_id": alertID},
 	}
-	invalid, err := s.notifier.Notify(ctx, tokens, msg)
-	if err != nil {
-		log.Printf("dog %d: push failed: %v", dogID, err)
+
+	if tokens, err := s.store.PushTokens(ctx, dogID); err != nil {
+		log.Printf("dog %d: load push tokens: %v", dogID, err)
+	} else if len(tokens) > 0 {
+		invalid, err := s.notifier.Notify(ctx, tokens, msg)
+		if err != nil {
+			log.Printf("dog %d: push failed: %v", dogID, err)
+		}
+		for _, t := range invalid {
+			if err := s.store.RemovePushToken(ctx, t); err != nil {
+				log.Printf("remove push token: %v", err)
+			}
+		}
 	}
-	for _, t := range invalid {
-		if err := s.store.RemovePushToken(ctx, t); err != nil {
-			log.Printf("remove push token: %v", err)
+
+	if s.opts.WebPush == nil {
+		return
+	}
+	if subs, err := s.store.WebPushSubs(ctx, dogID); err != nil {
+		log.Printf("dog %d: load web push subs: %v", dogID, err)
+	} else if len(subs) > 0 {
+		gone, err := s.opts.WebPush.NotifyWeb(ctx, subs, msg)
+		if err != nil {
+			log.Printf("dog %d: web push failed: %v", dogID, err)
+		}
+		for _, e := range gone {
+			if err := s.store.RemoveWebPush(ctx, e); err != nil {
+				log.Printf("remove web push sub: %v", err)
+			}
 		}
 	}
 }
@@ -352,6 +410,52 @@ func (s *Server) addPushToken(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) removePushToken(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.RemovePushToken(r.Context(), r.PathValue("token")); err != nil {
+		serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) webPushKey(w http.ResponseWriter, r *http.Request) {
+	if s.opts.WebPush == nil {
+		writeError(w, http.StatusNotFound, "web push is not configured on this server")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"public_key": s.opts.VAPIDPublicKey})
+}
+
+func (s *Server) addWebPush(w http.ResponseWriter, r *http.Request) {
+	id, ok := dogID(w, r)
+	if !ok {
+		return
+	}
+	var sub notify.WebSubscription
+	if !decode(w, r, &sub) {
+		return
+	}
+	if !strings.HasPrefix(sub.Endpoint, "https://") || sub.Keys.P256dh == "" || sub.Keys.Auth == "" {
+		writeError(w, http.StatusBadRequest, "invalid push subscription")
+		return
+	}
+	if _, err := s.store.Dog(r.Context(), id); err != nil {
+		storeError(w, err)
+		return
+	}
+	if err := s.store.AddWebPush(r.Context(), id, sub); err != nil {
+		serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) removeWebPush(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := s.store.RemoveWebPush(r.Context(), req.Endpoint); err != nil {
 		serverError(w, err)
 		return
 	}

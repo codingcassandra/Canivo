@@ -10,6 +10,11 @@
 //	NOTIFIER           "expo" (default) or "log" to print pushes instead of sending
 //	EXPO_ACCESS_TOKEN  optional, only if Expo push security is enabled
 //	PUSH_COOLDOWN      min time between pushes per dog (default 2m)
+//	VAPID_PUBLIC_KEY   } browser push (web app / iPhone Home Screen / Apple Watch);
+//	VAPID_PRIVATE_KEY  } generate with: go run ./cmd/vapidkeys
+//	VAPID_SUBJECT      contact email or https URL, required by Apple for web push
+//	ALLOWED_ORIGINS    comma-separated web app origins allowed to call the API,
+//	                   e.g. https://canivo.vercel.app
 package main
 
 import (
@@ -19,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -59,9 +65,26 @@ func main() {
 		n = notify.Log{}
 	}
 
+	opts := api.Options{PushCooldown: cooldown, APIKey: apiKey}
+	if pub, priv := os.Getenv("VAPID_PUBLIC_KEY"), os.Getenv("VAPID_PRIVATE_KEY"); pub != "" && priv != "" {
+		subject := os.Getenv("VAPID_SUBJECT")
+		if subject == "" {
+			log.Fatal("VAPID_SUBJECT is required with VAPID keys (your email or site URL)")
+		}
+		opts.WebPush = &notify.WebPush{PublicKey: pub, PrivateKey: priv, Subject: subject}
+		opts.VAPIDPublicKey = pub
+	} else {
+		log.Print("web push disabled (VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY not set)")
+	}
+	for _, o := range strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			opts.AllowedOrigins = append(opts.AllowedOrigins, o)
+		}
+	}
+
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           api.New(st, n, monitor.DefaultConfig(), cooldown, apiKey).Handler(),
+		Handler:           api.New(st, n, monitor.DefaultConfig(), opts).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,

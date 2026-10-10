@@ -38,7 +38,7 @@ func setup(t *testing.T) (http.Handler, fakeNotifier) {
 	cfg := monitor.DefaultConfig()
 	cfg.Calibration = 30 * time.Second
 	n := make(fakeNotifier, 10)
-	return New(st, n, cfg, 2*time.Minute, "").Handler(), n
+	return New(st, n, cfg, Options{PushCooldown: 2 * time.Minute}).Handler(), n
 }
 
 func TestAPIKey(t *testing.T) {
@@ -47,7 +47,7 @@ func TestAPIKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	h := New(st, notify.Log{}, monitor.DefaultConfig(), time.Minute, "s3cret").Handler()
+	h := New(st, notify.Log{}, monitor.DefaultConfig(), Options{APIKey: "s3cret"}).Handler()
 
 	for _, c := range []struct {
 		path, auth string
@@ -195,5 +195,97 @@ func TestErrors(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversized batch = %d", rec.Code)
+	}
+}
+
+type fakeWebPusher chan []notify.WebSubscription
+
+func (f fakeWebPusher) NotifyWeb(_ context.Context, subs []notify.WebSubscription, _ notify.Message) ([]string, error) {
+	f <- subs
+	return []string{subs[0].Endpoint}, nil // pretend it expired
+}
+
+func TestWebPush(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	web := make(fakeWebPusher, 1)
+	h := New(st, make(fakeNotifier, 1), monitor.DefaultConfig(), Options{
+		PushCooldown: time.Minute, WebPush: web, VAPIDPublicKey: "PUBKEY",
+	}).Handler()
+
+	var key map[string]string
+	if do(t, h, "GET", "/api/web-push/key", "", &key); key["public_key"] != "PUBKEY" {
+		t.Fatalf("key = %v", key)
+	}
+
+	dog, _ := st.CreateDog(context.Background(), "Rex")
+	st.SetBaseline(context.Background(), dog.ID, &monitor.Baseline{RateMean: 18, RateSD: 2, TensionMean: 232, TensionSD: 12})
+	if code := do(t, h, "POST", "/api/dogs/1/web-push", `{"endpoint":"http://insecure","keys":{"p256dh":"p","auth":"a"}}`, nil); code != 400 {
+		t.Errorf("insecure endpoint accepted: %d", code)
+	}
+	sub := `{"endpoint":"https://web.push.apple.com/x","expirationTime":null,"keys":{"p256dh":"p","auth":"a"}}`
+	if code := do(t, h, "POST", "/api/dogs/1/web-push", sub, nil); code != 204 {
+		t.Fatalf("subscribe = %d", code)
+	}
+
+	s := breath.NewSynth(18, 200)
+	var now int64
+	stream(t, h, "/api/dogs/1/samples", s, &now, 30000)
+	s.RateBPM, s.Tension = 40, 320
+	stream(t, h, "/api/dogs/1/samples", s, &now, 30000)
+
+	select {
+	case subs := <-web:
+		if len(subs) != 1 || subs[0].Endpoint != "https://web.push.apple.com/x" || subs[0].Keys.Auth != "a" {
+			t.Errorf("web push subs = %+v", subs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no web push sent")
+	}
+	// The pusher reported it gone, so it should be deleted.
+	time.Sleep(50 * time.Millisecond)
+	if subs, _ := st.WebPushSubs(context.Background(), 1); len(subs) != 0 {
+		t.Errorf("expired sub not removed: %+v", subs)
+	}
+}
+
+func TestWebPushDisabled(t *testing.T) {
+	h, _ := setup(t)
+	if code := do(t, h, "GET", "/api/web-push/key", "", nil); code != 404 {
+		t.Errorf("key without VAPID = %d", code)
+	}
+}
+
+func TestCORS(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	h := New(st, notify.Log{}, monitor.DefaultConfig(), Options{
+		APIKey: "k", AllowedOrigins: []string{"https://canivo.vercel.app/"},
+	}).Handler()
+
+	// Preflight: no API key, must still succeed.
+	req := httptest.NewRequest("OPTIONS", "/api/dogs", nil)
+	req.Header.Set("Origin", "https://canivo.vercel.app")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 204 || rec.Header().Get("Access-Control-Allow-Origin") != "https://canivo.vercel.app" ||
+		!strings.Contains(rec.Header().Get("Access-Control-Allow-Headers"), "Authorization") {
+		t.Errorf("preflight = %d %v", rec.Code, rec.Header())
+	}
+
+	// Real request from an allowed origin gets the header; others don't.
+	for origin, want := range map[string]string{"https://canivo.vercel.app": "https://canivo.vercel.app", "https://evil.example": ""} {
+		req = httptest.NewRequest("GET", "/api/dogs", nil)
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Authorization", "Bearer k")
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 || rec.Header().Get("Access-Control-Allow-Origin") != want {
+			t.Errorf("%s: %d allow=%q", origin, rec.Code, rec.Header().Get("Access-Control-Allow-Origin"))
+		}
 	}
 }

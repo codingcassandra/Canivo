@@ -66,6 +66,23 @@ npx expo start            # scan the QR code with the Expo Go app
   development build (`npx eas-cli@latest build --profile development --platform android`).
 - Run the server **without** `NOTIFIER=log` to send real pushes.
 
+## Web app + Apple Watch (`mobile/`, deployed to Vercel)
+
+The same app runs in a browser. Alerts arrive as web push notifications, and
+on an iPhone those are mirrored to a paired Apple Watch, which taps your wrist.
+
+- `npx expo start --web` to run it locally; `npx expo export -p web` builds `mobile/dist`.
+- `public/sw.js` is the service worker that shows notifications;
+  `public/manifest.json` makes it installable.
+- **iPhone:** web push only works from the Home Screen: open the site in
+  Safari → Share → **Add to Home Screen** → open it from there → **Turn on alerts**.
+  The watch buzzes while the iPhone is locked (unlocked, the alert shows on the phone).
+
+Deploy: Vercel → New Project → import this repo → **Root Directory `mobile`** →
+env var `EXPO_PUBLIC_SERVER_URL=https://canivo.onrender.com` → Deploy
+(`mobile/vercel.json` sets the build). Then on Render set `ALLOWED_ORIGINS` to
+the Vercel URL and the `VAPID_*` vars (`go run ./cmd/vapidkeys`).
+
 ## Configuration (server env vars)
 
 | Var | Default | |
@@ -77,6 +94,9 @@ npx expo start            # scan the QR code with the Expo Go app
 | `NOTIFIER` | `expo` | `log` to print instead of sending |
 | `EXPO_ACCESS_TOKEN` | – | only if Expo push security is on |
 | `PUSH_COOLDOWN` | `2m` | min time between pushes per dog |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | – | browser push; generate with `go run ./cmd/vapidkeys` |
+| `VAPID_SUBJECT` | – | your email; required by Apple with VAPID keys |
+| `ALLOWED_ORIGINS` | – | comma-separated web app URLs allowed to call the API |
 
 ## Deploy (Render + Supabase)
 
@@ -113,6 +133,9 @@ All `/api/*` routes need `Authorization: Bearer <API_KEY>` when the server has o
 | GET | `/api/dogs/{id}/alerts?limit=50` | alert history |
 | POST | `/api/dogs/{id}/push-tokens` | `{"token":"ExponentPushToken[...]"}` from the Expo app |
 | DELETE | `/api/push-tokens/{token}` | e.g. on logout |
+| GET | `/api/web-push/key` | `{"public_key":...}` VAPID key for `pushManager.subscribe` |
+| POST | `/api/dogs/{id}/web-push` | a browser `PushSubscription.toJSON()` |
+| POST | `/api/web-push/unsubscribe` | `{"endpoint":...}` |
 
 Push payload `data`: `{"type":"alert","dog_id":1,"alert_id":7}`.
 
@@ -121,13 +144,14 @@ Push payload `data`: `{"type":"alert","dog_id":1,"alert_id":7}`.
 ```
 cmd/server      HTTP server
 cmd/bridge      serial → HTTP forwarder (+ simulator)
+cmd/vapidkeys   generates web push keys
 internal/breath breath detection from EMG envelope (+ synthetic signal)
 internal/monitor baseline, arousal score, calm/alert state machine
 internal/store  SQLite: dogs, baselines, alerts, push tokens
-internal/notify Expo push
+internal/notify Expo push + Web Push
 internal/api    HTTP handlers
 firmware/       Arduino Nano sketch
-mobile/         Expo phone app
+mobile/         Expo app: iOS/Android + web (Vercel)
 ```
 
 ## Not done yet

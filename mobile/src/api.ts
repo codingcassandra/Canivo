@@ -80,6 +80,9 @@ export function createClient(serverUrl: string, apiKey = '') {
     addPushToken: (id: number, token: string) => request<void>('POST', `/api/dogs/${id}/push-tokens`, { token }),
     removePushToken: (token: string) =>
       request<void>('DELETE', `/api/push-tokens/${encodeURIComponent(token)}`),
+    webPushKey: () => request<{ public_key: string }>('GET', '/api/web-push/key'),
+    addWebPush: (id: number, subscription: unknown) => request<void>('POST', `/api/dogs/${id}/web-push`, subscription),
+    removeWebPush: (endpoint: string) => request<void>('POST', '/api/web-push/unsubscribe', { endpoint }),
   };
 }
 

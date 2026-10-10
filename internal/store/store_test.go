@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/codingcassandra/Canivo/internal/monitor"
+	"github.com/codingcassandra/Canivo/internal/notify"
 )
 
 // Runs against SQLite by default. Set TEST_DATABASE_URL=postgres://... to
@@ -72,5 +73,22 @@ func TestStore(t *testing.T) {
 	}
 	if toks, _ := s.PushTokens(ctx, d.ID); len(toks) != 0 {
 		t.Fatalf("tokens after remove = %v", toks)
+	}
+
+	var sub notify.WebSubscription
+	sub.Endpoint = "https://web.push.apple.com/abc"
+	sub.Keys.P256dh, sub.Keys.Auth = "p1", "a1"
+	s.AddWebPush(ctx, d.ID, sub)
+	sub.Keys.P256dh = "p2" // browser re-subscribed with new keys
+	if err := s.AddWebPush(ctx, d.ID, sub); err != nil {
+		t.Fatal(err)
+	}
+	subs, err := s.WebPushSubs(ctx, d.ID)
+	if err != nil || len(subs) != 1 || subs[0].Keys.P256dh != "p2" {
+		t.Fatalf("web subs = %+v %v", subs, err)
+	}
+	s.RemoveWebPush(ctx, sub.Endpoint)
+	if subs, _ := s.WebPushSubs(ctx, d.ID); len(subs) != 0 {
+		t.Fatalf("web subs after remove = %+v", subs)
 	}
 }

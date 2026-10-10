@@ -2,6 +2,8 @@ import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
+import { Client } from './api';
+import { off, PushState } from './pushState';
 
 // Show alerts as banners even while the app is open.
 Notifications.setNotificationHandler({
@@ -13,11 +15,20 @@ Notifications.setNotificationHandler({
   }),
 });
 
-export type PushResult = { token: string } | { error: string };
+// Asks for permission, gets this phone's Expo push token and registers it with
+// the server for this dog. (The browser version is push.web.ts.)
+export async function enablePush(client: Client, dogId: number, _userTapped: boolean): Promise<PushState> {
+  const r = await expoToken();
+  if ('error' in r) return off(r.error);
+  try {
+    await client.addPushToken(dogId, r.token);
+  } catch (e) {
+    return off((e as Error).message);
+  }
+  return { status: 'on', unregister: () => client.removePushToken(r.token) };
+}
 
-// Asks for permission and returns this device's Expo push token, or a
-// human-readable reason why push isn't available.
-export async function registerForPush(): Promise<PushResult> {
+async function expoToken(): Promise<{ token: string } | { error: string }> {
   if (!Device.isDevice) {
     return { error: 'Push needs a real phone, not a simulator.' };
   }

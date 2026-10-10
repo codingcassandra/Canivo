@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, AppState, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { AppState, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { AlertRecord, createClient, Dog, Status } from './api';
-import { registerForPush } from './push';
+import { confirm } from './confirm';
+import { enablePush } from './push';
+import { PushState } from './pushState';
 import { Settings } from './settings';
 import { Button } from './SetupScreen';
 import { colors } from './theme';
@@ -25,7 +27,7 @@ export function DogScreen({ settings, onChangeDog }: Props) {
   const [status, setStatus] = useState<Status | null>(null);
   const [alerts, setAlerts] = useState<AlertRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [push, setPush] = useState<{ token?: string; error?: string } | null>(null);
+  const [push, setPush] = useState<PushState | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const lastState = useRef<string | null>(null);
 
@@ -68,36 +70,28 @@ export function DogScreen({ settings, onChangeDog }: Props) {
     };
   }, [client, dogId, poll, refreshAlerts]);
 
-  // Register this phone for push alerts about this dog.
+  // Register this phone/browser for push alerts about this dog.
+  const turnOnPush = useCallback(
+    (userTapped: boolean) => enablePush(client, dogId, userTapped).then(setPush),
+    [client, dogId],
+  );
   useEffect(() => {
-    registerForPush().then(async (r) => {
-      if ('error' in r) {
-        setPush({ error: r.error });
-        return;
-      }
-      try {
-        await client.addPushToken(dogId, r.token);
-        setPush({ token: r.token });
-      } catch (e) {
-        setPush({ error: (e as Error).message });
-      }
-    });
-  }, [client, dogId]);
+    turnOnPush(false);
+  }, [turnOnPush]);
 
   const name = dog?.name ?? 'Your dog';
 
   const recalibrate = () =>
-    Alert.alert(`Recalibrate ${name}?`, `Make sure ${name} is calm and relaxed. The next 2 minutes become the new normal.`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Recalibrate',
-        onPress: () => client.recalibrate(dogId).then(setStatus, (e) => setError(e.message)),
-      },
-    ]);
+    confirm(
+      `Recalibrate ${name}?`,
+      `Make sure ${name} is calm and relaxed. The next 2 minutes become the new normal.`,
+      'Recalibrate',
+      () => client.recalibrate(dogId).then(setStatus, (e) => setError(e.message)),
+    );
 
   const changeDog = async () => {
     // Stop getting this dog's alerts on this phone.
-    if (push?.token) await client.removePushToken(push.token).catch(() => {});
+    if (push?.status === 'on') await push.unregister().catch(() => {});
     onChangeDog();
   };
 
@@ -126,9 +120,17 @@ export function DogScreen({ settings, onChangeDog }: Props) {
       )}
 
       <Text style={styles.label}>Notifications</Text>
-      <Text style={styles.muted}>
-        {push === null ? 'Setting up…' : push.token ? 'On. You’ll get a push when ' + name + ' goes on alert.' : push.error}
-      </Text>
+      {push?.status === 'needs-tap' ? (
+        <Button title="Turn on alerts" onPress={() => turnOnPush(true)} />
+      ) : (
+        <Text style={styles.muted}>
+          {push === null
+            ? 'Setting up…'
+            : push.status === 'on'
+              ? `On. You’ll get a notification when ${name} goes on alert.`
+              : push.reason}
+        </Text>
+      )}
 
       <Button title="Recalibrate" variant="secondary" onPress={recalibrate} />
       <Button title="Change dog or server" variant="secondary" onPress={changeDog} />

@@ -12,3 +12,11 @@ services:
         generateValue: true # Render creates a random secret; copy it from the Environment tab
       - key: DATABASE_URL
         sync: false # paste your Supabase connection string when prompted
+      - key: VAPID_PUBLIC_KEY
+        sync: false # from: go run ./cmd/vapidkeys
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        sync: false # your email, e.g. you@example.com
+      - key: ALLOWED_ORIGINS
+        sync: false # the web app URL, e.g. https://canivo.vercel.app

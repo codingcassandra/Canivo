@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/codingcassandra/Canivo/internal/monitor"
+	"github.com/codingcassandra/Canivo/internal/notify"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
@@ -60,6 +61,14 @@ CREATE TABLE IF NOT EXISTS push_tokens (
 	dog_id     BIGINT NOT NULL REFERENCES dogs(id) ON DELETE CASCADE,
 	created_at TEXT NOT NULL,
 	PRIMARY KEY (token, dog_id)
+);
+CREATE TABLE IF NOT EXISTS web_push_subs (
+	endpoint   TEXT NOT NULL,
+	dog_id     BIGINT NOT NULL REFERENCES dogs(id) ON DELETE CASCADE,
+	p256dh     TEXT NOT NULL,
+	auth       TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	PRIMARY KEY (endpoint, dog_id)
 );`
 
 // pgLockdown enables row-level security with no policies. On Supabase this
@@ -68,7 +77,8 @@ CREATE TABLE IF NOT EXISTS push_tokens (
 const pgLockdown = `
 ALTER TABLE dogs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE alerts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE push_tokens ENABLE ROW LEVEL SECURITY;`
+ALTER TABLE push_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE web_push_subs ENABLE ROW LEVEL SECURITY;`
 
 // Open opens (and migrates) a database. dsn is either a Postgres URL
 // ("postgres://...") or a SQLite file path (":memory:" in tests).
@@ -212,6 +222,38 @@ func (s *Store) PushTokens(ctx context.Context, dogID int64) ([]string, error) {
 // RemovePushToken deletes a token from every dog (e.g. the app was uninstalled).
 func (s *Store) RemovePushToken(ctx context.Context, token string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM push_tokens WHERE token = $1`, token)
+	return err
+}
+
+// AddWebPush saves a browser subscription; re-subscribing updates its keys.
+func (s *Store) AddWebPush(ctx context.Context, dogID int64, sub notify.WebSubscription) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO web_push_subs(endpoint, dog_id, p256dh, auth, created_at) VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (endpoint, dog_id) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth`,
+		sub.Endpoint, dogID, sub.Keys.P256dh, sub.Keys.Auth, fmtTime(time.Now()))
+	return err
+}
+
+func (s *Store) WebPushSubs(ctx context.Context, dogID int64) ([]notify.WebSubscription, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT endpoint, p256dh, auth FROM web_push_subs WHERE dog_id = $1`, dogID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var subs []notify.WebSubscription
+	for rows.Next() {
+		var sub notify.WebSubscription
+		if err := rows.Scan(&sub.Endpoint, &sub.Keys.P256dh, &sub.Keys.Auth); err != nil {
+			return nil, err
+		}
+		subs = append(subs, sub)
+	}
+	return subs, rows.Err()
+}
+
+// RemoveWebPush deletes a browser subscription from every dog.
+func (s *Store) RemoveWebPush(ctx context.Context, endpoint string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM web_push_subs WHERE endpoint = $1`, endpoint)
 	return err
 }
 
