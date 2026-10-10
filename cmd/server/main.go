@@ -55,7 +55,7 @@ func main() {
 		log.Fatalf("close stale alerts: %v", err)
 	}
 
-	apiKey := os.Getenv("API_KEY")
+	apiKey := strings.TrimSpace(os.Getenv("API_KEY")) // a pasted value may carry a stray space/newline
 	if apiKey == "" {
 		log.Print("WARNING: API_KEY not set; anyone who can reach this server can use it")
 	}
