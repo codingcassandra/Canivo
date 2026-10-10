@@ -12,7 +12,8 @@ EMG sensor → Arduino Nano ──USB serial──▶ bridge ──HTTP──▶
 
 ## Safe zone (GPS)
 
-In the app, under **Location**, stand at home, pick a size and tap **Set home
+The **Location** card only appears once a GPS collar has sent a location, so
+the app never suggests it can track a dog without one. Then, under **Location**, stand at home, pick a size and tap **Set home
 here**. The phone's location becomes the center of the safe zone. The collar
 posts GPS fixes to the server. When the dog leaves the zone, the owner gets a
 "Rex left home" push, and the app shows a red banner, a map with the dog's
@@ -29,7 +30,8 @@ go run ./cmd/gpssim -server https://canivo.onrender.com -dog 1
 ```
 
 AirTags can't be used: Apple offers no way for other apps to read their
-location.
+location. On Apple devices the app has an **Open Find My** button
+(`findmy://items`) so an owner whose dog wears an AirTag can check it there.
 
 ## How detection works
 

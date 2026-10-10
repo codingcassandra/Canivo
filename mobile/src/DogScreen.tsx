@@ -4,6 +4,7 @@ import { AlertRecord, Baseline, createClient, Dog, DogLocation, Status } from '.
 import { BreathChart, Point } from './BreathChart';
 import { BreathingRing } from './BreathingRing';
 import { confirm } from './confirm';
+import { hasFindMy, openFindMy } from './findMy';
 import { LocationCard, openDirections } from './LocationCard';
 import { enablePush } from './push';
 import { PushState } from './pushState';
@@ -217,9 +218,33 @@ export function DogScreen({ settings, onChangeDog }: Props) {
           <BreathChart points={history} baseline={baseline?.rate_mean} windowMs={CHART_WINDOW_MS} />
         </Card>
 
+        {/* GPS tracking only shows once a GPS collar has sent a location, so
+            the app never suggests it can track a dog it can't. */}
+        {loc?.last && (
+          <Card style={styles.section}>
+            <SectionTitle icon="map-marker-radius" title="Location" />
+            <LocationCard client={client} dogId={dogId} name={name} loc={loc} onChange={setLoc} />
+          </Card>
+        )}
+
         <Card style={styles.section}>
-          <SectionTitle icon="map-marker-radius" title="Location" />
-          <LocationCard client={client} dogId={dogId} name={name} loc={loc} onChange={setLoc} />
+          <SectionTitle icon="map-search-outline" title="AirTag" />
+          <T style={{ color: colors.muted }}>
+            If {name} wears an AirTag, you can see where it is in Apple’s Find My app. Canivo can’t see AirTag
+            locations.
+          </T>
+          {hasFindMy ? (
+            <Button
+              title="Open Find My"
+              icon="open-in-new"
+              variant="soft"
+              onPress={() => openFindMy().catch(() => setError('Couldn’t open Find My. Open it from your Home Screen.'))}
+            />
+          ) : (
+            <T variant="caption" style={{ marginTop: 8 }}>
+              Find My is only on iPhone, iPad and Mac.
+            </T>
+          )}
         </Card>
 
         <Card style={styles.section}>
@@ -242,7 +267,7 @@ export function DogScreen({ settings, onChangeDog }: Props) {
           <SectionTitle icon={push?.status === 'on' ? 'bell-ring' : 'bell-off-outline'} title="Notifications" />
           {push?.status === 'needs-tap' ? (
             <>
-              <T style={{ color: colors.muted }}>Get a buzz on your phone (and Apple Watch) when {name} goes on alert or leaves home.</T>
+              <T style={{ color: colors.muted }}>Get a buzz on your phone (and Apple Watch) when {name} goes on alert.</T>
               <Button title="Turn on alerts" icon="bell-ring" onPress={() => turnOnPush(true)} />
             </>
           ) : (
@@ -250,7 +275,7 @@ export function DogScreen({ settings, onChangeDog }: Props) {
               {push === null
                 ? 'Setting up…'
                 : push.status === 'on'
-                  ? `On. You’ll get a notification when ${name} goes on alert or leaves home.`
+                  ? `On. You’ll get a notification when ${name} goes on alert.`
                   : push.reason}
             </T>
           )}
