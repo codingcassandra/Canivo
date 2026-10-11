@@ -135,7 +135,7 @@ func TestFullFlow(t *testing.T) {
 
 	select {
 	case p := <-pushes:
-		if len(p.tokens) != 1 || p.tokens[0] != "ExponentPushToken[abc]" || !strings.Contains(p.msg.Title, "Rex") ||
+		if len(p.tokens) != 1 || p.tokens[0] != "ExponentPushToken[abc]" || !strings.HasPrefix(p.msg.Title, "🟠 ") || !strings.Contains(p.msg.Title, "Rex") ||
 			p.msg.Body != "Time to redirect Rex." {
 			t.Errorf("push = %+v", p)
 		}
@@ -210,9 +210,12 @@ func TestDangerFlow(t *testing.T) {
 			switch p.msg.Data["type"] {
 			case "alert":
 				sawAlert = true
+				if !strings.HasPrefix(p.msg.Title, "🟠 ") {
+					t.Errorf("alert push title = %q", p.msg.Title)
+				}
 			case "danger":
 				sawDanger = true
-				if !strings.Contains(p.msg.Title, "Rex") || !strings.Contains(p.msg.Title, "danger") {
+				if !strings.HasPrefix(p.msg.Title, "🔴 ") || !strings.Contains(p.msg.Title, "Rex") || !strings.Contains(p.msg.Title, "danger") {
 					t.Errorf("danger push title = %q", p.msg.Title)
 				}
 			default:
@@ -529,7 +532,11 @@ func TestEveryAlertIsPushed(t *testing.T) {
 	}
 	defer st.Close()
 	pushes := make(fakeNotifier, 10)
-	srv := New(st, pushes, monitor.DefaultConfig(), Options{PushCooldown: 30 * time.Second})
+	cfg := monitor.DefaultConfig()
+	// This test counts alert notifications; danger (which adds its own
+	// notification) has its own test, TestDangerFlow.
+	cfg.DangerScore = 1e9
+	srv := New(st, pushes, cfg, Options{PushCooldown: 30 * time.Second})
 	clock := time.Now()
 	srv.now = func() time.Time { return clock }
 	h := srv.Handler()

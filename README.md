@@ -51,6 +51,9 @@ location. On Apple devices the app has an **Open Find My** button
    Every alert is pushed, except one that starts within 30 s of the previous
    alert ending: that's a flare-up of the same episode (`PUSH_COOLDOWN`).
    Danger is always pushed, but no more than once per `PUSH_COOLDOWN`.
+   Notification titles start with 🟠 for alert and 🔴 for danger (push services
+   can't tint a notification, so the circle carries the level); the app uses the
+   same orange and red.
    All of these numbers are in `monitor.DefaultConfig()` (`internal/monitor`).
 
 **Speed.** A clear change in the dog alerts in about 6 s (a moderate one in

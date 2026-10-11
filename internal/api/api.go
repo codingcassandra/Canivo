@@ -470,11 +470,19 @@ func (s *Server) handleEvent(ctx context.Context, dogID int64, rt *dogRuntime, e
 
 func (s *Server) push(dogID, alertID int64, name string, ev monitor.Event, b monitor.Baseline) {
 	s.send(dogID, notify.Message{
-		Title: name + " is on high alert",
+		Title: alertMark + name + " is on high alert",
 		Body:  alertBody(name, s.suggest(dogID, alertID, ev, b)),
 		Data:  map[string]any{"type": "alert", "dog_id": dogID, "alert_id": alertID},
 	})
 }
+
+// Level markers at the start of notification titles. Push services have no
+// per-message color, so a colored circle is what shows the level at a glance;
+// the app uses the same orange and red.
+const (
+	alertMark  = "🟠 "
+	dangerMark = "🔴 "
+)
 
 // pushDanger is the louder, more urgent counterpart to push.
 func (s *Server) pushDanger(dogID, alertID int64, name string, ev monitor.Event, b monitor.Baseline) {
@@ -483,7 +491,7 @@ func (s *Server) pushDanger(dogID, alertID int64, name string, ev monitor.Event,
 		tip = "Go to " + name + " now and move them somewhere calm."
 	}
 	s.send(dogID, notify.Message{
-		Title: name + " is in danger",
+		Title: dangerMark + name + " is in danger",
 		Body:  alertBody(name, tip),
 		Data:  map[string]any{"type": "danger", "dog_id": dogID, "alert_id": alertID},
 	})

@@ -223,7 +223,7 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
           <View style={styles.awayBanner}>
             <View style={styles.awayTop}>
               <View style={styles.awayIcon}>
-                <Icon name="run-fast" size={24} color={tones.alert.fg} />
+                <Icon name="run-fast" size={24} color={tones.warning.fg} />
               </View>
               <View style={{ flex: 1 }}>
                 <T variant="heading" style={{ color: '#fff' }}>
@@ -235,7 +235,7 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
               </View>
             </View>
             <Pressable onPress={() => openDirections(loc.last!)} style={({ pressed }) => [styles.awayButton, pressed && { opacity: 0.85 }]}>
-              <Icon name="directions" color={tones.alert.fg} />
+              <Icon name="directions" color={tones.warning.fg} />
               <Text style={styles.awayButtonText}>Get directions</Text>
             </Pressable>
           </View>
@@ -483,7 +483,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     alignItems: 'center',
-    backgroundColor: tones.alert.soft,
+    backgroundColor: tones.warning.soft,
     borderRadius: radius.sm,
     padding: 12,
     marginTop: 12,
@@ -518,7 +518,7 @@ const styles = StyleSheet.create({
     marginTop: 14,
   },
   askIcon: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
-  awayBanner: { backgroundColor: tones.alert.fg, borderRadius: radius.md, padding: 16, marginTop: 12 },
+  awayBanner: { backgroundColor: tones.warning.fg, borderRadius: radius.md, padding: 16, marginTop: 12 },
   awayTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   awayIcon: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
   awayButton: {
@@ -531,5 +531,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  awayButtonText: { fontFamily: fonts.bold, fontSize: 17, color: tones.alert.fg },
+  awayButtonText: { fontFamily: fonts.bold, fontSize: 17, color: tones.warning.fg },
 });

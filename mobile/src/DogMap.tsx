@@ -66,7 +66,7 @@ export function DogMap({ zone, dog, trail, away, height = 220 }: Props) {
     }
   }
 
-  const dogColor = away ? tones.alert.fg : colors.primary;
+  const dogColor = away ? tones.warning.fg : colors.primary;
 
   return (
     <View style={[styles.map, { height }]} onLayout={(e) => setWidth(e.nativeEvent.layout.width)}>
