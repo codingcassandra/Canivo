@@ -25,6 +25,7 @@ export const tones: Record<State | 'offline', Tone> = {
   calm: { fg: '#2F6BDB', soft: '#E4ECFC', glow: '#9DBDF5', label: 'Calm' },
   calibrating: { fg: '#B98A07', soft: '#FFF1C2', glow: '#F8D96E', label: 'Learning' },
   alert: { fg: '#D9483A', soft: '#FDE3DF', glow: '#F4A196', label: 'High alert' },
+  danger: { fg: '#A61B1B', soft: '#F9CFCB', glow: '#E0574D', label: 'Danger' },
   offline: { fg: '#8E94A8', soft: '#EEEFF4', glow: '#D3D6E0', label: 'Offline' },
 };
 

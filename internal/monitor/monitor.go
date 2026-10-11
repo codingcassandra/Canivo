@@ -1,7 +1,10 @@
 // Package monitor decides when a dog is on high alert by comparing its live
 // breathing features against its own calm baseline.
 //
-// Flow: calibrating (learn the baseline while the dog is calm) -> calm <-> alert.
+// Flow: calibrating (learn the baseline while the dog is calm) -> calm <-> alert
+// <-> danger. Danger is a higher-arousal level on top of alert: it can start
+// from calm (a sudden, very strong reaction) or from alert (things got worse),
+// and always steps back down through alert before returning to calm.
 // The arousal score is a weighted z-score: how far the breathing rate has moved
 // from baseline (either direction — alert dogs often freeze and hold their
 // breath) plus how much muscle tension has risen.
@@ -20,29 +23,36 @@ const (
 	Calibrating State = "calibrating"
 	Calm        State = "calm"
 	Alert       State = "alert"
+	Danger      State = "danger"
 )
 
 type Config struct {
-	WindowMs      int64         // feature window for the breath detector
-	Calibration   time.Duration // how long of calm signal to learn from
-	AlertScore    float64       // score that starts an alert...
-	AlertSustain  time.Duration // ...if held this long
-	ClearScore    float64       // score below which an alert clears...
-	ClearSustain  time.Duration // ...if held this long
-	RateWeight    float64
-	TensionWeight float64
+	WindowMs         int64         // feature window for the breath detector
+	Calibration      time.Duration // how long of calm signal to learn from
+	AlertScore       float64       // score that starts an alert...
+	AlertSustain     time.Duration // ...if held this long
+	ClearScore       float64       // score below which an alert clears...
+	ClearSustain     time.Duration // ...if held this long (also used to step down from danger)
+	DangerScore      float64       // score that starts danger...
+	DangerSustain    time.Duration // ...if held this long
+	DangerClearScore float64       // score below which danger steps down to alert (keep below DangerScore)
+	RateWeight       float64
+	TensionWeight    float64
 }
 
 func DefaultConfig() Config {
 	return Config{
-		WindowMs:      15000,
-		Calibration:   2 * time.Minute,
-		AlertScore:    2.5,
-		AlertSustain:  3 * time.Second,
-		ClearScore:    1.5,
-		ClearSustain:  10 * time.Second,
-		RateWeight:    0.5,
-		TensionWeight: 0.5,
+		WindowMs:         15000,
+		Calibration:      2 * time.Minute,
+		AlertScore:       2.5,
+		AlertSustain:     3 * time.Second,
+		ClearScore:       1.5,
+		ClearSustain:     10 * time.Second,
+		DangerScore:      4.0,
+		DangerSustain:    3 * time.Second,
+		DangerClearScore: 3.0,
+		RateWeight:       0.5,
+		TensionWeight:    0.5,
 	}
 }
 
@@ -67,9 +77,11 @@ type Status struct {
 type EventKind string
 
 const (
-	AlertStarted EventKind = "alert_started"
-	AlertCleared EventKind = "alert_cleared"
-	Calibrated   EventKind = "calibrated"
+	AlertStarted  EventKind = "alert_started"
+	AlertCleared  EventKind = "alert_cleared"
+	DangerStarted EventKind = "danger_started" // from calm or alert
+	DangerCleared EventKind = "danger_cleared" // stepped down to alert, which is still open
+	Calibrated    EventKind = "calibrated"
 )
 
 type Event struct {
@@ -94,7 +106,8 @@ type Monitor struct {
 	tSum, tSq float64
 
 	lastEval  int64 // device ms of last feature evaluation
-	crossedAt int64 // device ms when the score first crossed the active threshold; -1 if not crossed
+	crossedAt int64 // device ms when the score first crossed the alert/clear/step-down threshold; -1 if not crossed
+	dangerAt  int64 // device ms when the score first crossed the danger threshold; -1 if not crossed
 }
 
 // New creates a monitor. Pass a stored baseline to skip calibration.
@@ -115,7 +128,7 @@ func (m *Monitor) reset(b *Baseline) {
 	}
 	m.calStart, m.calN = -1, 0
 	m.rSum, m.rSq, m.tSum, m.tSq = 0, 0, 0, 0
-	m.crossedAt = -1
+	m.crossedAt, m.dangerAt = -1, -1
 	m.lastEval = 0
 	m.last = Status{State: m.state, Baseline: b}
 }
@@ -132,7 +145,7 @@ func (m *Monitor) Ingest(samples []breath.Sample) (Status, []Event) {
 		m.det.Push(s)
 		f := m.det.Features()
 		if f.At < before { // detector restarted (device reboot); restart timers
-			m.lastEval, m.crossedAt, m.calStart = 0, -1, -1
+			m.lastEval, m.crossedAt, m.dangerAt, m.calStart = 0, -1, -1, -1
 		}
 		if !f.Ready || f.At-m.lastEval < 1000 {
 			continue // evaluate once per second of signal
@@ -158,32 +171,56 @@ func (m *Monitor) evaluate(f breath.Features) (Event, bool) {
 
 	switch m.state {
 	case Calm:
-		if m.sustained(score >= m.cfg.AlertScore, f.At, m.cfg.AlertSustain) {
+		// Danger is checked first so a sudden, very strong reaction goes
+		// straight to danger rather than stopping at alert.
+		if m.sustained(&m.dangerAt, score >= m.cfg.DangerScore, f.At, m.cfg.DangerSustain) {
+			m.crossedAt = -1
+			m.state, m.last.State = Danger, Danger
+			ev.Kind = DangerStarted
+			return ev, true
+		}
+		if m.sustained(&m.crossedAt, score >= m.cfg.AlertScore, f.At, m.cfg.AlertSustain) {
 			m.state, m.last.State = Alert, Alert
 			ev.Kind = AlertStarted
 			return ev, true
 		}
 	case Alert:
-		if m.sustained(score < m.cfg.ClearScore, f.At, m.cfg.ClearSustain) {
+		if m.sustained(&m.dangerAt, score >= m.cfg.DangerScore, f.At, m.cfg.DangerSustain) {
+			m.crossedAt = -1
+			m.state, m.last.State = Danger, Danger
+			ev.Kind = DangerStarted
+			return ev, true
+		}
+		if m.sustained(&m.crossedAt, score < m.cfg.ClearScore, f.At, m.cfg.ClearSustain) {
 			m.state, m.last.State = Calm, Calm
 			ev.Kind = AlertCleared
+			return ev, true
+		}
+	case Danger:
+		// Steps down to alert, not straight to calm; the alert then clears
+		// on its own once the score stays low.
+		if m.sustained(&m.crossedAt, score < m.cfg.DangerClearScore, f.At, m.cfg.ClearSustain) {
+			m.dangerAt = -1
+			m.state, m.last.State = Alert, Alert
+			ev.Kind = DangerCleared
 			return ev, true
 		}
 	}
 	return Event{}, false
 }
 
-// sustained reports whether cond has held continuously for d.
-func (m *Monitor) sustained(cond bool, at int64, d time.Duration) bool {
+// sustained reports whether cond has held continuously for d, tracking how
+// long in *since. It resets *since when cond fails or once it fires.
+func (m *Monitor) sustained(since *int64, cond bool, at int64, d time.Duration) bool {
 	if !cond {
-		m.crossedAt = -1
+		*since = -1
 		return false
 	}
-	if m.crossedAt < 0 {
-		m.crossedAt = at
+	if *since < 0 {
+		*since = at
 	}
-	if at-m.crossedAt >= d.Milliseconds() {
-		m.crossedAt = -1
+	if at-*since >= d.Milliseconds() {
+		*since = -1
 		return true
 	}
 	return false

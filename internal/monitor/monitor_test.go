@@ -49,11 +49,15 @@ func TestCalibrateThenAlertThenClear(t *testing.T) {
 		t.Fatalf("calm dog produced events %v", kinds(evs))
 	}
 
-	// Dog spots something: fast breathing, tense muscles.
-	s.RateBPM, s.Tension = 40, 320
-	evs = feed(m, s, &now, 30000)
+	// Dog spots something: noticeably faster breathing. Strong enough for an
+	// alert, but not for danger.
+	s.RateBPM, s.Tension = 26, 235
+	evs = feed(m, s, &now, 60000)
 	if got := kinds(evs); len(got) != 1 || got[0] != AlertStarted {
 		t.Fatalf("alert events = %v (status %+v)", got, m.Status())
+	}
+	if st := m.Status().State; st != Alert {
+		t.Fatalf("state = %v, want alert", st)
 	}
 
 	s.RateBPM, s.Tension = 18, 200
@@ -63,7 +67,7 @@ func TestCalibrateThenAlertThenClear(t *testing.T) {
 	}
 }
 
-func TestBreathHoldFreezeAlerts(t *testing.T) {
+func TestBreathHoldFreezeAlertsThenDanger(t *testing.T) {
 	b := &Baseline{RateMean: 18, RateSD: 2, TensionMean: 232, TensionSD: 12}
 	m := New(DefaultConfig(), b)
 	s := breath.NewSynth(18, 200)
@@ -72,10 +76,138 @@ func TestBreathHoldFreezeAlerts(t *testing.T) {
 		t.Fatalf("calm events = %v", kinds(evs))
 	}
 
-	s.Amplitude, s.Tension = 0, 260 // frozen, holding breath, stiff
+	// Frozen, holding breath, stiff. The breathing rate falls away as the
+	// window empties, so this alerts first and, once the breath-hold is
+	// complete, escalates to danger.
+	s.Amplitude, s.Tension = 0, 260
 	evs := feed(m, s, &now, 30000)
-	if got := kinds(evs); len(got) != 1 || got[0] != AlertStarted {
-		t.Fatalf("freeze events = %v (status %+v)", got, m.Status())
+	want := []EventKind{AlertStarted, DangerStarted}
+	if got := kinds(evs); len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("freeze events = %v, want %v (status %+v)", got, want, m.Status())
+	}
+}
+
+func TestStrongReactionEscalatesToDangerThenStepsDown(t *testing.T) {
+	b := &Baseline{RateMean: 18, RateSD: 2, TensionMean: 232, TensionSD: 12}
+	m := New(DefaultConfig(), b)
+	s := breath.NewSynth(18, 200)
+	var now int64
+	feed(m, s, &now, 30000)
+
+	s.RateBPM, s.Tension = 40, 320 // fast breathing and very tense
+	evs := feed(m, s, &now, 40000)
+	want := []EventKind{AlertStarted, DangerStarted}
+	if got := kinds(evs); len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("escalation events = %v, want %v (status %+v)", got, want, m.Status())
+	}
+	if st := m.Status().State; st != Danger {
+		t.Fatalf("state = %v, want danger", st)
+	}
+
+	// Back to normal: danger steps down to alert, then the alert clears.
+	s.RateBPM, s.Tension = 18, 200
+	evs = feed(m, s, &now, 90000)
+	want = []EventKind{DangerCleared, AlertCleared}
+	if got := kinds(evs); len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("recovery events = %v, want %v (status %+v)", got, want, m.Status())
+	}
+}
+
+// holdScore drives the state machine directly with one reading per second at a
+// chosen arousal score. With this baseline the score is |rate-18|/4 (tension
+// is held at its mean), so rate = 18 + 4*score.
+func holdScore(m *Monitor, now *int64, score float64, secs int) []Event {
+	var evs []Event
+	for i := 0; i < secs; i++ {
+		*now += 1000
+		f := breath.Features{At: *now, RateBPM: 18 + 4*score, Tension: 232, Ready: true}
+		if ev, ok := m.evaluate(f); ok {
+			evs = append(evs, ev)
+		}
+	}
+	return evs
+}
+
+func newCalmMonitor() *Monitor {
+	return New(DefaultConfig(), &Baseline{RateMean: 18, RateSD: 2, TensionMean: 232, TensionSD: 12})
+}
+
+func wantKinds(t *testing.T, label string, evs []Event, want ...EventKind) {
+	t.Helper()
+	got := kinds(evs)
+	if len(got) != len(want) {
+		t.Fatalf("%s: events = %v, want %v", label, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s: events = %v, want %v", label, got, want)
+		}
+	}
+}
+
+func TestCalmGoesStraightToDanger(t *testing.T) {
+	m := newCalmMonitor()
+	var now int64
+
+	// Not held long enough yet (under the 3s sustain).
+	wantKinds(t, "short", holdScore(m, &now, 5, 2))
+	// Held long enough: one danger event, with no separate alert event.
+	wantKinds(t, "sustained", holdScore(m, &now, 5, 3), DangerStarted)
+	if st := m.Status().State; st != Danger {
+		t.Fatalf("state = %v, want danger", st)
+	}
+}
+
+func TestAlertEscalatesToDangerAndStepsBackDown(t *testing.T) {
+	m := newCalmMonitor()
+	var now int64
+
+	wantKinds(t, "alert", holdScore(m, &now, 3.0, 8), AlertStarted)
+	wantKinds(t, "danger", holdScore(m, &now, 5.0, 8), DangerStarted)
+
+	// Between the step-down score (3.0) and the danger score (4.0) it stays
+	// in danger instead of flapping.
+	wantKinds(t, "hysteresis", holdScore(m, &now, 3.5, 30))
+	if st := m.Status().State; st != Danger {
+		t.Fatalf("state = %v, want danger", st)
+	}
+
+	// Below the step-down score it drops to alert, not straight to calm,
+	// even though 2.0 is above the alert-clear score.
+	wantKinds(t, "step down", holdScore(m, &now, 2.0, 12), DangerCleared)
+	if st := m.Status().State; st != Alert {
+		t.Fatalf("state = %v, want alert", st)
+	}
+
+	// Even a near-zero score takes a second hold to clear the alert.
+	wantKinds(t, "clear", holdScore(m, &now, 0.5, 12), AlertCleared)
+	if st := m.Status().State; st != Calm {
+		t.Fatalf("state = %v, want calm", st)
+	}
+}
+
+func TestDangerNeverSkipsStraightToCalm(t *testing.T) {
+	m := newCalmMonitor()
+	var now int64
+	wantKinds(t, "danger", holdScore(m, &now, 6, 8), DangerStarted)
+
+	wantKinds(t, "step down", holdScore(m, &now, 0.2, 11), DangerCleared)
+	if st := m.Status().State; st != Alert {
+		t.Fatalf("state = %v, want alert", st)
+	}
+	wantKinds(t, "clear", holdScore(m, &now, 0.2, 11), AlertCleared)
+}
+
+func TestBriefDangerSpikeStaysAlert(t *testing.T) {
+	m := newCalmMonitor()
+	var now int64
+	wantKinds(t, "alert", holdScore(m, &now, 3.0, 8), AlertStarted)
+
+	// A 2s spike above the danger score, under the 3s sustain, is ignored.
+	wantKinds(t, "spike", holdScore(m, &now, 5.0, 2))
+	wantKinds(t, "after", holdScore(m, &now, 3.0, 20))
+	if st := m.Status().State; st != Alert {
+		t.Fatalf("state = %v, want alert", st)
 	}
 }
 

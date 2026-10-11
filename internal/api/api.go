@@ -51,8 +51,11 @@ type dogRuntime struct {
 	mon       *monitor.Monitor
 	openAlert int64 // 0 when no alert is open
 	lastPush  time.Time
-	lastSeen  time.Time
-	chats     []time.Time // recent chat questions, for the rate limit
+	// lastDangerPush rate-limits danger pushes separately from alert pushes,
+	// so a worsening situation still reaches the owner right after an alert.
+	lastDangerPush time.Time
+	lastSeen       time.Time
+	chats          []time.Time // recent chat questions, for the rate limit
 
 	// seq counts status changes; changed is closed (and replaced) on each
 	// one, waking up apps waiting in GET /status?after=.
@@ -425,6 +428,28 @@ func (s *Server) handleEvent(ctx context.Context, dogID int64, rt *dogRuntime, e
 			go s.push(dogID, alertID, rt.name, ev, *rt.mon.Baseline())
 		}
 
+	case monitor.DangerStarted:
+		// Danger can start straight from calm, in which case no alert is open
+		// yet; the alert record then covers the whole episode.
+		if rt.openAlert == 0 {
+			alertID, err := s.store.StartAlert(ctx, store.Alert{
+				DogID: dogID, StartedAt: now, Score: ev.Score, RateBPM: ev.RateBPM, Tension: ev.Tension,
+			})
+			if err != nil {
+				return err
+			}
+			rt.openAlert = alertID
+		}
+		log.Printf("dog %d: DANGER alert=%d score=%.1f rate=%.0f", dogID, rt.openAlert, ev.Score, ev.RateBPM)
+		if now.Sub(rt.lastDangerPush) >= s.opts.PushCooldown {
+			rt.lastDangerPush = now
+			go s.pushDanger(dogID, rt.openAlert, rt.name, ev, *rt.mon.Baseline())
+		}
+
+	case monitor.DangerCleared:
+		// Stepped down to alert; the alert stays open until it clears.
+		log.Printf("dog %d: danger cleared, still on alert %d", dogID, rt.openAlert)
+
 	case monitor.AlertCleared:
 		log.Printf("dog %d: alert %d cleared", dogID, rt.openAlert)
 		if rt.openAlert != 0 {
@@ -440,8 +465,21 @@ func (s *Server) handleEvent(ctx context.Context, dogID int64, rt *dogRuntime, e
 func (s *Server) push(dogID, alertID int64, name string, ev monitor.Event, b monitor.Baseline) {
 	s.send(dogID, notify.Message{
 		Title: name + " is on high alert",
-		Body:  alertBody(name, ev, b, s.suggest(dogID, alertID, ev, b)),
+		Body:  alertBody(name, s.suggest(dogID, alertID, ev, b)),
 		Data:  map[string]any{"type": "alert", "dog_id": dogID, "alert_id": alertID},
+	})
+}
+
+// pushDanger is the louder, more urgent counterpart to push.
+func (s *Server) pushDanger(dogID, alertID int64, name string, ev monitor.Event, b monitor.Baseline) {
+	tip := s.suggest(dogID, alertID, ev, b)
+	if tip == "" {
+		tip = "Go to " + name + " now and move them somewhere calm."
+	}
+	s.send(dogID, notify.Message{
+		Title: name + " is in danger",
+		Body:  alertBody(name, tip),
+		Data:  map[string]any{"type": "danger", "dog_id": dogID, "alert_id": alertID},
 	})
 }
 
@@ -532,18 +570,13 @@ func (s *Server) adviceDog(ctx context.Context, dogID, skipAlert int64) (advice.
 	return d, nil
 }
 
-// alertBody explains what tripped the alert relative to the dog's normal, then
-// what to do, e.g. "Breathing 34 bpm (usually 18), muscle tension up 40%.
-// Time to redirect Rex." The tip, if any, replaces "Time to redirect Rex."
-func alertBody(name string, ev monitor.Event, b monitor.Baseline, tip string) string {
-	body := fmt.Sprintf("Breathing %.0f bpm (usually %.0f)", ev.RateBPM, b.RateMean)
-	if pct := tensionUpPct(ev, b); pct >= 10 {
-		body += fmt.Sprintf(", muscle tension up %.0f%%", pct)
-	}
+// alertBody is what the owner should do, with no sensor numbers, e.g.
+// "Time to redirect Rex." The tip, if any, replaces that fixed wording.
+func alertBody(name, tip string) string {
 	if tip == "" {
-		tip = "Time to redirect " + name + "."
+		return "Time to redirect " + name + "."
 	}
-	return body + ". " + tip
+	return tip
 }
 
 func tensionUpPct(ev monitor.Event, b monitor.Baseline) float64 {
