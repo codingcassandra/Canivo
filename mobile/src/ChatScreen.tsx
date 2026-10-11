@@ -269,6 +269,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: colors.text,
     maxHeight: 120,
+    outlineWidth: 0,
     paddingTop: 9,
     paddingBottom: 9,
   },

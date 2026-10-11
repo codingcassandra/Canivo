@@ -132,7 +132,8 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     paddingHorizontal: 14,
   },
-  input: { flex: 1, fontFamily: fonts.semibold, fontSize: 16, color: colors.text, paddingVertical: 14 },
+  // outlineStyle: the rounded field shows focus; hide the browser's square outline on web.
+  input: { flex: 1, fontFamily: fonts.semibold, fontSize: 16, color: colors.text, paddingVertical: 14, outlineWidth: 0 },
   fieldMultiline: { alignItems: 'flex-start', paddingTop: 14 },
   inputMultiline: { minHeight: 72, paddingTop: 0, textAlignVertical: 'top' },
   backHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingTop: 12, paddingBottom: 12 },

@@ -3,10 +3,12 @@ import { AppState, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View
 import { AlertRecord, Baseline, Client, Dog, DogLocation, Status } from './api';
 import { BreathChart, Point } from './BreathChart';
 import { BreathingRing } from './BreathingRing';
+import { ChatScreen } from './ChatScreen';
 import { confirm } from './confirm';
 import { hasFindMy, openFindMy } from './findMy';
 import { LocationCard, openDirections } from './LocationCard';
 import { enablePush } from './push';
+import { ProfileScreen } from './ProfileScreen';
 import { PushState } from './pushState';
 import { colors, fonts, radius, Tone, tones } from './theme';
 import { Button, Card, Icon, IconName, Pill, T } from './ui';
@@ -16,6 +18,8 @@ const RETRY_MS = 2000;
 const OFFLINE_AFTER_MS = 10000;
 const CHART_WINDOW_MS = 5 * 60 * 1000;
 const LOCATION_POLL_MS = 5000;
+// The calming tip is written after the alert starts; check back for it this long.
+const TIP_WAIT_MS = 30000;
 
 type Props = {
   client: Client;
@@ -33,6 +37,7 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
   const [push, setPush] = useState<PushState | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [loc, setLoc] = useState<DogLocation | null>(null);
+  const [page, setPage] = useState<'home' | 'chat' | 'profile'>('home');
   const lastState = useRef<string | null>(null);
 
   const pollLocation = useCallback(async () => {
@@ -112,6 +117,17 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
     };
   }, [client, dogId, applyStatus, pollLocation, refreshAlerts]);
 
+  // The open alert, and its calming tip once the server has written it.
+  const openAlert = status?.state === 'alert' ? alerts.find((a) => a.id === status.alert_id) : undefined;
+  const waitingForTip = status?.state === 'alert' && !!status.alert_id && !openAlert?.tip;
+  const tipSince = openAlert?.started_at;
+  useEffect(() => {
+    if (!waitingForTip) return;
+    if (tipSince && Date.now() - Date.parse(tipSince) > TIP_WAIT_MS) return; // no tip coming
+    const t = setTimeout(() => refreshAlerts().catch(() => {}), 3000);
+    return () => clearTimeout(t);
+  }, [waitingForTip, tipSince, alerts, refreshAlerts]);
+
   // Register this phone/browser for push alerts about this dog.
   const turnOnPush = useCallback(
     (userTapped: boolean) => enablePush(client, dogId, userTapped).then(setPush),
@@ -155,6 +171,31 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
     ]);
     setRefreshing(false);
   };
+
+  if (page === 'chat') {
+    return (
+      <ChatScreen
+        client={client}
+        dogId={dogId}
+        name={name}
+        onBack={() => setPage('home')}
+        onEditProfile={() => setPage('profile')}
+      />
+    );
+  }
+  if (page === 'profile' && dog) {
+    return (
+      <ProfileScreen
+        client={client}
+        dog={dog}
+        onBack={() => setPage('home')}
+        onSaved={(d) => {
+          setDog(d);
+          setPage('home');
+        }}
+      />
+    );
+  }
 
   const offline = !status || isOffline(status);
   const tone = offline ? tones.offline : tones[status.state];
@@ -216,7 +257,7 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
           caption={tone.label}
         />
 
-        {status && <Message name={name} status={status} offline={offline} tone={tone} />}
+        {status && <Message name={name} status={status} offline={offline} tone={tone} tip={openAlert?.tip} />}
 
         {baseline && !offline && status.state !== 'calibrating' && (
           <View style={styles.metrics}>
@@ -244,6 +285,19 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
             />
           </View>
         )}
+
+        <Pressable onPress={() => setPage('chat')} style={({ pressed }) => [styles.askCard, pressed && { opacity: 0.85 }]}>
+          <View style={styles.askIcon}>
+            <Icon name="chat-question" size={24} color={colors.primary} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <T variant="heading" style={{ color: '#fff' }}>
+              Ask about {name}
+            </T>
+            <T style={{ color: '#fff', opacity: 0.92 }}>Food ideas, training, health questions</T>
+          </View>
+          <Icon name="chevron-right" size={26} color="#fff" />
+        </Pressable>
 
         <Card style={styles.section}>
           <SectionTitle icon="heart-pulse" title="Last 5 minutes" />
@@ -295,6 +349,14 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
           )}
         </Card>
 
+        {dog && (
+          <Card style={styles.section}>
+            <SectionTitle icon="dog" title={`About ${name}`} />
+            <T style={{ color: colors.muted }}>{profileSummary(dog)}</T>
+            <Button title="Edit profile" icon="pencil" variant="soft" onPress={() => setPage('profile')} />
+          </Card>
+        )}
+
         <Card style={styles.section}>
           <SectionTitle icon={push?.status === 'on' ? 'bell-ring' : 'bell-off-outline'} title="Notifications" />
           {push?.status === 'needs-tap' ? (
@@ -338,7 +400,29 @@ function signedPct(value: number, mean: number) {
   return `${pct > 0 ? '+' : ''}${pct}%`;
 }
 
-function Message({ name, status, offline, tone }: { name: string; status: Status; offline: boolean; tone: Tone }) {
+// One line about the dog's profile, or a nudge to fill it in.
+function profileSummary(dog: Dog) {
+  const p = dog.profile ?? {};
+  const basics = [p.breed, p.age, p.weight].filter(Boolean).join(' · ');
+  if (!Object.values(p).some(Boolean)) {
+    return `Tell Canivo about ${dog.name}’s breed, diet and what calms them, so chat answers and alert tips fit ${dog.name}.`;
+  }
+  return (basics ? basics + '. ' : '') + (p.calming ? `Calms down with: ${p.calming}` : 'Add what helps them calm down for better alert tips.');
+}
+
+function Message({
+  name,
+  status,
+  offline,
+  tone,
+  tip,
+}: {
+  name: string;
+  status: Status;
+  offline: boolean;
+  tone: Tone;
+  tip?: string;
+}) {
   let icon: IconName = 'paw';
   let title: string;
   let body: string;
@@ -352,7 +436,7 @@ function Message({ name, status, offline, tone }: { name: string; status: Status
   } else if (status.state === 'alert') {
     icon = 'alert-circle';
     title = `Redirect ${name} now`;
-    body = `Call ${name}'s name, step between them and the trigger, or ask for a cue they know well.`;
+    body = tip ?? `Call ${name}'s name, step between them and the trigger, or ask for a cue they know well.`;
   } else if (status.state === 'calibrating') {
     icon = 'paw';
     title = `Getting to know ${name}`;
@@ -449,6 +533,11 @@ function AlertRow({ alert, baseline, last }: { alert: AlertRecord; baseline?: Ba
         <T variant="caption">
           {start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · {trigger(alert, baseline)}
         </T>
+        {alert.tip && (
+          <T variant="caption" style={styles.alertTip}>
+            Tip: {alert.tip}
+          </T>
+        )}
       </View>
       <Pill
         text={duration}
@@ -512,6 +601,17 @@ const styles = StyleSheet.create({
   alertDivider: { borderBottomWidth: 1, borderBottomColor: colors.border },
   alertDot: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
   footer: { marginTop: 10 },
+  alertTip: { color: colors.text, fontFamily: fonts.regular, marginTop: 2 },
+  askCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: colors.primary,
+    borderRadius: radius.md,
+    padding: 16,
+    marginTop: 14,
+  },
+  askIcon: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
   awayBanner: { backgroundColor: tones.alert.fg, borderRadius: radius.md, padding: 16, marginTop: 12 },
   awayTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   awayIcon: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },

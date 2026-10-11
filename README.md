@@ -126,7 +126,7 @@ the Vercel URL and the `VAPID_*` vars (`go run ./cmd/vapidkeys`).
 | `PUSH_COOLDOWN` | `2m` | min time between pushes per dog |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | – | browser push; generate with `go run ./cmd/vapidkeys` |
 | `VAPID_SUBJECT` | – | your email; required by Apple with VAPID keys |
-| `GEMINI_API_KEY` | – | adds a Gemini-written calming tip to alert pushes ([get a key](https://aistudio.google.com/apikey)); unset = "Time to redirect …" |
+| `GEMINI_API_KEY` | – | turns on the AI assistant ([get a key](https://aistudio.google.com/apikey)): in-app chat, and calming tips in alert pushes personalized from the dog's profile; unset = no chat, alerts say "Time to redirect …" |
 | `GEMINI_MODEL` | `gemini-3.5-flash-lite` | |
 | `ALLOWED_ORIGINS` | – | comma-separated web app URLs allowed to call the API |
 
