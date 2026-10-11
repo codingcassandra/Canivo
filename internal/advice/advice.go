@@ -26,10 +26,11 @@ type Dog struct {
 	RecentAlerts []store.Alert // newest first
 }
 
-// Situation is the dog at the moment an alert starts.
+// Situation is the dog at the moment an alert starts. Breathing isn't part
+// of it: tips never talk about the dog's breathing.
 type Situation struct {
 	Dog
-	RateBPM      float64 // breathing rate now
+	Danger       bool    // danger level, not just high alert
 	TensionUpPct float64 // muscle tension above baseline, in percent; <= 0 if not raised
 }
 
@@ -61,10 +62,10 @@ const (
 	geminiURL    = "https://generativelanguage.googleapis.com/v1beta"
 )
 
-const tipPrompt = `You help dog owners calm their dog in the moment. A sensor on the dog has just detected it is on high alert (stressed, reactive or fearful), based on breathing rate and muscle tension.
+const tipPrompt = `You help dog owners calm their dog in the moment. A sensor on the dog has just detected it is on high alert (stressed, reactive or fearful), or at the more serious danger level.
 Reply with ONE practical, gentle, humane thing the owner can do right now to calm or redirect the dog, addressed to the owner, using the dog's name. Don't guess the dog's sex: say "they" unless the owner's notes say otherwise.
 Personalize it: if the owner has said what helps the dog calm down, prefer those things; take the dog's known triggers, age, size and health into account (e.g. no treats that clash with allergies or diet). Don't repeat the recent tips listed; vary the wording and the technique.
-Rules: a single sentence, under 140 characters, plain text, no emoji, no greeting, no quotes. Never suggest punishment, yelling, leash corrections or medication. If the breathing rate is extremely high (over 3x usual), suggest moving the dog somewhere cool and quiet and calling a vet if it doesn't settle.`
+Rules: a single sentence, under 140 characters, plain text, no emoji, no greeting, no quotes. Never mention the dog's breathing, breaths, panting or respiration. Never suggest punishment, yelling, leash corrections or medication. At the danger level, tell the owner to go to the dog now, move them somewhere cool and quiet, and call a vet if they don't settle.`
 
 const chatPrompt = `You are Canivo's dog-care assistant, inside an app where an owner watches their dog's stress through a harness that senses breathing and muscle tension. Answer the owner's questions about their dog: food and nutrition, treats, training, behavior, exercise, grooming, health and general dog facts. Personalize every answer to the dog described below (breed, age, weight, diet, health, triggers) and use the dog's name. Don't guess the dog's sex: say "they" unless the owner's notes say otherwise.
 - Format for a quick read on a phone: answer with 2 to 4 bullet points, each starting with "- " on its own line and under 15 words. No intro or closing sentence, no sub-bullets, no headings, bold, tables or emoji. If something needs a warning (like seeing a vet), make it one of the bullets. If the owner asks for more detail, you may use up to 6 bullets.
@@ -247,11 +248,18 @@ func about(d Dog, now time.Time) string {
 	return b.String()
 }
 
-// describe turns the alert into the tip prompt.
+// describe turns the alert into the tip prompt. It leaves out breathing
+// entirely, so the tip can't bring it up.
 func describe(s Situation) string {
 	var b strings.Builder
-	b.WriteString(about(s.Dog, time.Now()))
-	fmt.Fprintf(&b, "\nRight now: breathing %.0f breaths/min (usually %.0f).", s.RateBPM, s.UsualRateBPM)
+	d := s.Dog
+	d.UsualRateBPM = 0
+	b.WriteString(about(d, time.Now()))
+	if s.Danger {
+		b.WriteString("\nRight now: DANGER level, the most serious.")
+	} else {
+		b.WriteString("\nRight now: high alert.")
+	}
 	if s.TensionUpPct >= 10 {
 		fmt.Fprintf(&b, " Muscle tension up %.0f%%.", s.TensionUpPct)
 	}
@@ -284,6 +292,13 @@ func clean(s string) string {
 	s = strings.Trim(s, `"'* `)
 	return capLen(s, MaxLen)
 }
+
+// mentionsBreathing catches a tip that talks about breathing despite the
+// instructions; such a tip is dropped for the standard wording.
+var mentionsBreathing = regexp.MustCompile(`(?i)breath|\bpant|respirat|\binhal|\bexhal`)
+
+// MentionsBreathing reports whether text talks about the dog's breathing.
+func MentionsBreathing(text string) bool { return mentionsBreathing.MatchString(text) }
 
 var (
 	headingRe   = regexp.MustCompile(`(?m)^#{1,6}\s+`)

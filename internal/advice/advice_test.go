@@ -42,7 +42,7 @@ func TestGeminiSuggest(t *testing.T) {
 	g, got, path := fakeGemini(t, `{"candidates":[{"content":{"role":"model","parts":[
 		{"text":"planning...","thought":true},
 		{"text":"\"Ask Rex for a sit,\n"},{"text":"then reward with a treat.\"\n"}]}}]}`)
-	tip, err := g.Suggest(context.Background(), Situation{Dog: rex, RateBPM: 34, TensionUpPct: 40})
+	tip, err := g.Suggest(context.Background(), Situation{Dog: rex, TensionUpPct: 40})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,9 +54,31 @@ func TestGeminiSuggest(t *testing.T) {
 	}
 	prompt := got.Contents[0].Parts[0].Text
 	for _, want := range []string{"Name: Rex", "Breed: beagle", "What helps them calm down: sniffing games",
-		"34 breaths/min (usually 18)", "up 40%", "- Scatter treats", "last 7 days: 1"} {
+		"Right now: high alert.", "up 40%", "- Scatter treats", "last 7 days: 1"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	// Tips never talk about breathing, so the model isn't told about it.
+	if strings.Contains(strings.ToLower(prompt), "breath") {
+		t.Errorf("tip prompt mentions breathing:\n%s", prompt)
+	}
+	g.Suggest(context.Background(), Situation{Dog: rex, Danger: true})
+	if p := got.Contents[0].Parts[0].Text; !strings.Contains(p, "DANGER") {
+		t.Errorf("danger not in prompt:\n%s", p)
+	}
+}
+
+func TestMentionsBreathing(t *testing.T) {
+	for text, want := range map[string]bool{
+		"Rex's breathing is fast, take them somewhere quiet.": true,
+		"Let Rex catch their breath in the shade.":            true,
+		"Rex is panting; offer water.":                        true,
+		"Ask Rex for a sit, then reward with a treat.":        false,
+		"Invite a participant to toss Rex a toy.":             false,
+	} {
+		if got := MentionsBreathing(text); got != want {
+			t.Errorf("MentionsBreathing(%q) = %v", text, got)
 		}
 	}
 }

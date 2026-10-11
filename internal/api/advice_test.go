@@ -62,7 +62,7 @@ func TestAlertTip(t *testing.T) {
 	st.SetAlertTip(ctx, old, "Scatter a few treats for Rex to sniff out.")
 	now, _ := st.StartAlert(ctx, store.Alert{DogID: dog.ID, StartedAt: time.Now()})
 
-	body := alertBody("Rex", s.suggest(dog.ID, now, ev, b))
+	body := alertBody("Rex", s.suggest(dog.ID, now, ev, b, false))
 	if body != "Ask Rex to sit and reward him." {
 		t.Errorf("body = %q", body)
 	}
@@ -82,12 +82,28 @@ func TestAlertTip(t *testing.T) {
 	// A failing advisor (or none) falls back to the fixed wording.
 	s, st = newServer(t, &fakeAdvisor{err: errors.New("quota")})
 	dog, _ = st.CreateDog(ctx, "Rex", 0)
-	if body := alertBody("Rex", s.suggest(dog.ID, 1, ev, b)); body != "Time to redirect Rex." {
+	if body := alertBody("Rex", s.suggest(dog.ID, 1, ev, b, false)); body != "Time to redirect Rex." {
 		t.Errorf("fallback body = %q", body)
 	}
 	s, _ = newServer(t, nil)
-	if tip := s.suggest(1, 1, ev, b); tip != "" {
+	if tip := s.suggest(1, 1, ev, b, false); tip != "" {
 		t.Errorf("no advisor tip = %q", tip)
+	}
+
+	// A tip that talks about breathing is dropped for the fixed wording.
+	s, st = newServer(t, &fakeAdvisor{tip: "Rex is breathing fast, take them outside."})
+	dog, _ = st.CreateDog(ctx, "Rex", 0)
+	if body := alertBody("Rex", s.suggest(dog.ID, 1, ev, b, false)); body != "Time to redirect Rex." {
+		t.Errorf("breathing tip body = %q", body)
+	}
+
+	// Danger is passed through to the advisor.
+	da := &fakeAdvisor{tip: "Go to Rex now."}
+	s, st = newServer(t, da)
+	dog, _ = st.CreateDog(ctx, "Rex", 0)
+	s.suggest(dog.ID, 1, ev, b, true)
+	if !da.got.Danger {
+		t.Error("danger not passed to advisor")
 	}
 }
 

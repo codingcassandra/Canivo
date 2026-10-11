@@ -471,7 +471,7 @@ func (s *Server) handleEvent(ctx context.Context, dogID int64, rt *dogRuntime, e
 func (s *Server) push(dogID, alertID int64, name string, ev monitor.Event, b monitor.Baseline) {
 	s.send(dogID, notify.Message{
 		Title: alertMark + name + " is on high alert",
-		Body:  alertBody(name, s.suggest(dogID, alertID, ev, b)),
+		Body:  alertBody(name, s.suggest(dogID, alertID, ev, b, false)),
 		Data:  map[string]any{"type": "alert", "dog_id": dogID, "alert_id": alertID},
 	})
 }
@@ -486,7 +486,7 @@ const (
 
 // pushDanger is the louder, more urgent counterpart to push.
 func (s *Server) pushDanger(dogID, alertID int64, name string, ev monitor.Event, b monitor.Baseline) {
-	tip := s.suggest(dogID, alertID, ev, b)
+	tip := s.suggest(dogID, alertID, ev, b, true)
 	if tip == "" {
 		tip = "Go to " + name + " now and move them somewhere calm."
 	}
@@ -538,7 +538,7 @@ func (s *Server) send(dogID int64, msg notify.Message) {
 // suggest asks the advisor for a calming tip personalized to the dog, and
 // saves it on the alert so the app can show it too. It returns "" if there is
 // no advisor or it fails or is slow; the alert must still go out promptly.
-func (s *Server) suggest(dogID, alertID int64, ev monitor.Event, b monitor.Baseline) string {
+func (s *Server) suggest(dogID, alertID int64, ev monitor.Event, b monitor.Baseline, danger bool) string {
 	if s.opts.Advisor == nil {
 		return ""
 	}
@@ -550,9 +550,13 @@ func (s *Server) suggest(dogID, alertID int64, ev monitor.Event, b monitor.Basel
 		return ""
 	}
 	d.UsualRateBPM = b.RateMean
-	tip, err := s.opts.Advisor.Suggest(ctx, advice.Situation{Dog: d, RateBPM: ev.RateBPM, TensionUpPct: tensionUpPct(ev, b)})
+	tip, err := s.opts.Advisor.Suggest(ctx, advice.Situation{Dog: d, Danger: danger, TensionUpPct: tensionUpPct(ev, b)})
 	if err != nil {
 		log.Printf("dog %d: calming tip: %v", dogID, err)
+		return ""
+	}
+	if advice.MentionsBreathing(tip) {
+		log.Printf("dog %d: dropped a calming tip that mentions breathing: %q", dogID, tip)
 		return ""
 	}
 	if err := s.store.SetAlertTip(context.Background(), alertID, tip); err != nil {

@@ -400,7 +400,7 @@ function Message({
     body = `Keep ${name} relaxed for a couple of minutes while we learn what calm looks like.`;
   } else {
     title = `${name} is relaxed`;
-    body = 'Breathing looks normal.';
+    body = `All calm. A good moment to praise ${name} or practice an easy cue.`;
   }
 
   return (
