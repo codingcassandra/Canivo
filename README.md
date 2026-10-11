@@ -69,7 +69,7 @@ go run ./cmd/bridge -dog 1 -simulate
 
 # 3b. real hardware: flash firmware/canivo_nano/canivo_nano.ino, then
 go run ./cmd/bridge -list                 # find the port
-go run ./cmd/bridge -dog 1 -port /dev/cu.usbserial-110
+go run ./cmd/bridge -dog 1     # finds the Arduino on USB; or -port /dev/cu.usbmodem101 (see -list)
 ```
 
 Close the Arduino IDE's Serial Monitor first—only one program can hold the port.

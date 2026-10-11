@@ -72,7 +72,8 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			now := s.now()
 			sess, err := s.store.Session(r.Context(), p.tokenHash, now)
 			if errors.Is(err, store.ErrNotFound) {
-				writeError(w, http.StatusUnauthorized, "your session has expired, please sign in again")
+				// Either an expired sign-in (app) or a wrong API key (bridge, collar).
+				writeError(w, http.StatusUnauthorized, "wrong API key, or your session has expired (sign in again)")
 				return
 			}
 			if err != nil {

@@ -49,7 +49,7 @@ type dogRuntime struct {
 	name      string
 	ownerID   int64 // 0 = no owner (only the API key can reach it)
 	mon       *monitor.Monitor
-	openAlert int64 // 0 when no alert is open
+	openAlert int64     // 0 when no alert is open
 	lastClear time.Time // when the last alert ended
 	lastSeen  time.Time
 	chats     []time.Time // recent chat questions, for the rate limit
