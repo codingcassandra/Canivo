@@ -39,7 +39,7 @@ func setup(t *testing.T) (http.Handler, fakeNotifier) {
 	cfg := monitor.DefaultConfig()
 	cfg.Calibration = 30 * time.Second
 	n := make(fakeNotifier, 10)
-	return New(st, n, cfg, Options{PushCooldown: 2 * time.Minute}).Handler(), n
+	return New(st, n, cfg, Options{PushCooldown: 30 * time.Second}).Handler(), n
 }
 
 func TestAPIKey(t *testing.T) {
@@ -153,7 +153,8 @@ func TestFullFlow(t *testing.T) {
 		t.Fatalf("alerts = %+v", alerts)
 	}
 
-	// A second alert inside the cooldown is recorded but not pushed again.
+	// An alert right after the last one ended (a flare-up of the same
+	// episode) is recorded but not pushed again.
 	s.RateBPM, s.Tension = 40, 320
 	stream(t, h, "/api/dogs/1/samples", s, &now, 30000)
 	select {
@@ -447,5 +448,61 @@ func TestStatusWaitsForChange(t *testing.T) {
 		if code := do(t, h, "GET", "/api/dogs/1/status?"+q, "", nil); code != 400 {
 			t.Errorf("%s: %d", q, code)
 		}
+	}
+}
+
+// Alerts a couple of minutes apart each get a notification; only a flare-up
+// right after an alert ended is skipped.
+func TestEveryAlertIsPushed(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	pushes := make(fakeNotifier, 10)
+	srv := New(st, pushes, monitor.DefaultConfig(), Options{PushCooldown: 30 * time.Second})
+	clock := time.Now()
+	srv.now = func() time.Time { return clock }
+	h := srv.Handler()
+
+	dog, _ := st.CreateDog(context.Background(), "Rex", 0)
+	st.SetBaseline(context.Background(), dog.ID, &monitor.Baseline{RateMean: 18, RateSD: 2, TensionMean: 220, TensionSD: 11})
+	do(t, h, "POST", "/api/dogs/1/push-tokens", `{"token":"ExponentPushToken[a]"}`, nil)
+
+	s := breath.NewSynth(18, 200)
+	var now int64
+	// stream advances the server clock along with the device clock.
+	run := func(rate, tension float64, ms int64) {
+		s.RateBPM, s.Tension = rate, tension
+		for end := now + ms; now < end; {
+			stream(t, h, "/api/dogs/1/samples", s, &now, 1000)
+			clock = clock.Add(time.Second)
+		}
+	}
+	pushed := func() bool {
+		select {
+		case <-pushes:
+			return true
+		case <-time.After(300 * time.Millisecond):
+			return false
+		}
+	}
+
+	run(18, 200, 30000)
+	for i, gap := range []int64{60000, 90000, 60000} { // calm gaps between episodes, like the simulator
+		run(40, 320, 20000)
+		if !pushed() {
+			t.Fatalf("episode %d (after %d s calm): no notification", i+1, gap/1000)
+		}
+		run(18, 200, gap)
+	}
+
+	// A flare-up 5 s after an alert ended is the same episode: no second buzz.
+	run(40, 320, 20000)
+	pushed()
+	run(18, 200, 14000) // clears after ~10 s below threshold
+	run(40, 320, 20000)
+	if pushed() {
+		t.Fatal("flare-up right after an alert was pushed again")
 	}
 }

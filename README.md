@@ -45,7 +45,8 @@ location. On Apple devices the app has an **Open Find My** button
 4. **Arousal score** – `0.5·|rate z-score| + 0.5·(tension z-score, increases only)`.
    Rate counts in both directions because alert dogs often freeze and hold their
    breath. Score ≥ 2.5 for 3 s → **alert** + push. Score < 1.5 for 10 s → calm.
-   Pushes are rate-limited to one per dog every 2 minutes (`internal/monitor`).
+   Every alert is pushed, except one that starts within 30 s of the previous
+   alert ending: that's a flare-up of the same episode (`PUSH_COOLDOWN`).
 
 **Speed.** A clear change in the dog alerts in about 6 s (a moderate one in
 about 9 s), and the app shows it about 1 s later: the bridge sends every 200 ms
@@ -123,7 +124,7 @@ the Vercel URL and the `VAPID_*` vars (`go run ./cmd/vapidkeys`).
 | `DB_PATH` | `canivo.db` | SQLite file |
 | `NOTIFIER` | `expo` | `log` to print instead of sending |
 | `EXPO_ACCESS_TOKEN` | – | only if Expo push security is on |
-| `PUSH_COOLDOWN` | `2m` | min time between pushes per dog |
+| `PUSH_COOLDOWN` | `30s` | an alert starting this soon after the last one ended is a flare-up of the same episode: recorded, not pushed again |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | – | browser push; generate with `go run ./cmd/vapidkeys` |
 | `VAPID_SUBJECT` | – | your email; required by Apple with VAPID keys |
 | `GEMINI_API_KEY` | – | turns on the AI assistant ([get a key](https://aistudio.google.com/apikey)): in-app chat, and calming tips in alert pushes personalized from the dog's profile; unset = no chat, alerts say "Time to redirect …" |
