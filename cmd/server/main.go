@@ -11,7 +11,8 @@
 //	DB_PATH            SQLite file (default canivo.db)
 //	NOTIFIER           "expo" (default) or "log" to print pushes instead of sending
 //	EXPO_ACCESS_TOKEN  optional, only if Expo push security is enabled
-//	PUSH_COOLDOWN      min time between pushes per dog (default 2m)
+//	PUSH_COOLDOWN      an alert starting within this long after the previous one
+//	                   ended is the same episode and isn't pushed again (default 30s)
 //	VAPID_PUBLIC_KEY   } browser push (web app / iPhone Home Screen / Apple Watch);
 //	VAPID_PRIVATE_KEY  } generate with: go run ./cmd/vapidkeys
 //	VAPID_SUBJECT      contact email or https URL, required by Apple for web push
@@ -43,7 +44,7 @@ import (
 
 func main() {
 	port := env("PORT", "8090")
-	cooldown, err := time.ParseDuration(env("PUSH_COOLDOWN", "2m"))
+	cooldown, err := time.ParseDuration(env("PUSH_COOLDOWN", "30s"))
 	if err != nil {
 		log.Fatalf("PUSH_COOLDOWN: %v", err)
 	}

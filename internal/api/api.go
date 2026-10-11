@@ -49,10 +49,10 @@ type dogRuntime struct {
 	name      string
 	ownerID   int64 // 0 = no owner (only the API key can reach it)
 	mon       *monitor.Monitor
-	openAlert int64 // 0 when no alert is open
-	lastPush  time.Time
-	// lastDangerPush rate-limits danger pushes separately from alert pushes,
-	// so a worsening situation still reaches the owner right after an alert.
+	openAlert int64     // 0 when no alert is open
+	lastClear time.Time // when the last alert ended
+	// lastDangerPush limits danger pushes to one per PushCooldown, so a dog
+	// flickering in and out of danger doesn't flood the owner's phone.
 	lastDangerPush time.Time
 	lastSeen       time.Time
 	chats          []time.Time // recent chat questions, for the rate limit
@@ -68,7 +68,10 @@ type dogRuntime struct {
 }
 
 type Options struct {
-	PushCooldown time.Duration // min time between pushes per dog
+	// PushCooldown: an alert that starts within this long of the previous
+	// alert ending counts as a flare-up of the same episode and isn't pushed
+	// again. Any later alert is always pushed.
+	PushCooldown time.Duration
 	// APIKey is the shared key for devices (bridge, GPS collar), sent as
 	// "Authorization: Bearer <APIKey>". It can reach every dog. Owners use
 	// session tokens from /api/auth/login instead. Empty = requests without
@@ -423,9 +426,11 @@ func (s *Server) handleEvent(ctx context.Context, dogID int64, rt *dogRuntime, e
 		}
 		rt.openAlert = alertID
 		log.Printf("dog %d: ALERT %d score=%.1f rate=%.0f", dogID, alertID, ev.Score, ev.RateBPM)
-		if now.Sub(rt.lastPush) >= s.opts.PushCooldown {
-			rt.lastPush = now
+		if rt.lastClear.IsZero() || now.Sub(rt.lastClear) >= s.opts.PushCooldown {
 			go s.push(dogID, alertID, rt.name, ev, *rt.mon.Baseline())
+		} else {
+			log.Printf("dog %d: alert %d is a flare-up %v after the last one ended; not pushed",
+				dogID, alertID, now.Sub(rt.lastClear).Round(time.Second))
 		}
 
 	case monitor.DangerStarted:
@@ -452,6 +457,7 @@ func (s *Server) handleEvent(ctx context.Context, dogID int64, rt *dogRuntime, e
 
 	case monitor.AlertCleared:
 		log.Printf("dog %d: alert %d cleared", dogID, rt.openAlert)
+		rt.lastClear = now
 		if rt.openAlert != 0 {
 			if err := s.store.EndAlert(ctx, rt.openAlert, now); err != nil {
 				return err
