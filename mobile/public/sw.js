@@ -12,9 +12,15 @@ self.addEventListener('push', (event) => {
       data: msg.data,
       icon: '/icon-192.png',
       // Each alert gets its own notification, so every one buzzes (iPhone
-      // can silently replace one with the same tag). Location updates replace
+      // can silently replace one with the same tag). Danger gets its own too,
+      // so it never replaces the alert it escalates. Location updates replace
       // each other.
-      tag: msg.data?.type === 'alert' ? 'canivo-alert-' + msg.data.alert_id : 'canivo-location',
+      tag:
+        msg.data?.type === 'alert'
+          ? 'canivo-alert-' + msg.data.alert_id
+          : msg.data?.type === 'danger'
+            ? 'canivo-danger-' + msg.data.alert_id
+            : 'canivo-location',
       renotify: true, // a replaced location update still buzzes
       vibrate: [300, 100, 300], // Android; iPhone/Watch use their own haptic
     }),

@@ -95,7 +95,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     alignItems: 'center',
-    backgroundColor: tones.alert.soft,
+    backgroundColor: tones.warning.soft,
     borderRadius: radius.sm,
     padding: 12,
     marginTop: 16,

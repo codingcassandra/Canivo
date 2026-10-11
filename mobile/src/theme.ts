@@ -21,10 +21,15 @@ export const colors = {
 export type Tone = { fg: string; soft: string; glow: string; label: string };
 
 // Colors per dog state. `glow` is the halo around the breathing ring.
-export const tones: Record<State | 'offline', Tone> = {
+export const tones: Record<State | 'offline' | 'warning', Tone> = {
   calm: { fg: '#2F6BDB', soft: '#E4ECFC', glow: '#9DBDF5', label: 'Calm' },
   calibrating: { fg: '#B98A07', soft: '#FFF1C2', glow: '#F8D96E', label: 'Learning' },
-  alert: { fg: '#D9483A', soft: '#FDE3DF', glow: '#F4A196', label: 'High alert' },
+  // Orange for alert, red for danger: the same colors as the circles in the
+  // push notification titles.
+  alert: { fg: '#C75B0A', soft: '#FDE9D2', glow: '#F5B26B', label: 'High alert' },
+  danger: { fg: '#A61B1B', soft: '#F9CFCB', glow: '#E0574D', label: 'Danger' },
+  // Plain red for errors and "left home", which aren't a stress level.
+  warning: { fg: '#D9483A', soft: '#FDE3DF', glow: '#F4A196', label: 'Warning' },
   offline: { fg: '#8E94A8', soft: '#EEEFF4', glow: '#D3D6E0', label: 'Offline' },
 };
 

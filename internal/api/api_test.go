@@ -38,6 +38,8 @@ func setup(t *testing.T) (http.Handler, fakeNotifier) {
 	t.Cleanup(func() { st.Close() })
 	cfg := monitor.DefaultConfig()
 	cfg.Calibration = 30 * time.Second
+	// The tests that use setup are about plain alerts; danger has its own test.
+	cfg.DangerScore = 1e9
 	n := make(fakeNotifier, 10)
 	return New(st, n, cfg, Options{PushCooldown: 30 * time.Second}).Handler(), n
 }
@@ -133,8 +135,8 @@ func TestFullFlow(t *testing.T) {
 
 	select {
 	case p := <-pushes:
-		if len(p.tokens) != 1 || p.tokens[0] != "ExponentPushToken[abc]" || !strings.Contains(p.msg.Title, "Rex") ||
-			!strings.Contains(p.msg.Body, "usually 18") || !strings.Contains(p.msg.Body, "tension up") {
+		if len(p.tokens) != 1 || p.tokens[0] != "ExponentPushToken[abc]" || !strings.HasPrefix(p.msg.Title, "🟠 ") || !strings.Contains(p.msg.Title, "Rex") ||
+			p.msg.Body != "Time to redirect Rex." {
 			t.Errorf("push = %+v", p)
 		}
 	case <-time.After(2 * time.Second):
@@ -167,6 +169,76 @@ func TestFullFlow(t *testing.T) {
 	do(t, h, "POST", "/api/dogs/1/calibrate", "", &cal)
 	if cal.State != monitor.Calibrating || cal.AlertID != 0 {
 		t.Fatalf("recalibrate: %+v", cal)
+	}
+}
+
+func TestDangerFlow(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := monitor.DefaultConfig()
+	cfg.Calibration = 30 * time.Second
+	pushes := make(fakeNotifier, 10)
+	h := New(st, pushes, cfg, Options{PushCooldown: 2 * time.Minute}).Handler()
+
+	var dog store.Dog
+	if code := do(t, h, "POST", "/api/dogs", `{"name":"Rex"}`, &dog); code != 201 || dog.ID == 0 {
+		t.Fatalf("create dog: %d %+v", code, dog)
+	}
+	if code := do(t, h, "POST", "/api/dogs/1/push-tokens", `{"token":"ExponentPushToken[abc]"}`, nil); code != 204 {
+		t.Fatalf("add token: %d", code)
+	}
+
+	s := breath.NewSynth(18, 200)
+	var now int64
+	stream(t, h, "/api/dogs/1/samples", s, &now, 50000)
+
+	// A strong, sustained reaction goes through alert and on to danger.
+	s.RateBPM, s.Tension = 40, 320
+	status := stream(t, h, "/api/dogs/1/samples", s, &now, 60000)
+	if status.State != monitor.Danger || status.AlertID == 0 {
+		t.Fatalf("expected danger: %+v", status)
+	}
+
+	// The owner gets an alert push and a separate, more urgent danger push.
+	var sawAlert, sawDanger bool
+	for i := 0; i < 2; i++ {
+		select {
+		case p := <-pushes:
+			switch p.msg.Data["type"] {
+			case "alert":
+				sawAlert = true
+				if !strings.HasPrefix(p.msg.Title, "🟠 ") {
+					t.Errorf("alert push title = %q", p.msg.Title)
+				}
+			case "danger":
+				sawDanger = true
+				if !strings.HasPrefix(p.msg.Title, "🔴 ") || !strings.Contains(p.msg.Title, "Rex") || !strings.Contains(p.msg.Title, "danger") {
+					t.Errorf("danger push title = %q", p.msg.Title)
+				}
+			default:
+				t.Errorf("unexpected push %+v", p.msg)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("got %d pushes, want an alert push and a danger push", i)
+		}
+	}
+	if !sawAlert || !sawDanger {
+		t.Errorf("sawAlert=%v sawDanger=%v", sawAlert, sawDanger)
+	}
+
+	// One alert record covers the whole episode and closes once the dog recovers.
+	s.RateBPM, s.Tension = 18, 200
+	status = stream(t, h, "/api/dogs/1/samples", s, &now, 120000)
+	if status.State != monitor.Calm {
+		t.Fatalf("expected calm: %+v", status)
+	}
+	var alerts []store.Alert
+	do(t, h, "GET", "/api/dogs/1/alerts", "", &alerts)
+	if len(alerts) != 1 || alerts[0].EndedAt == nil {
+		t.Fatalf("alerts = %+v", alerts)
 	}
 }
 
@@ -460,7 +532,11 @@ func TestEveryAlertIsPushed(t *testing.T) {
 	}
 	defer st.Close()
 	pushes := make(fakeNotifier, 10)
-	srv := New(st, pushes, monitor.DefaultConfig(), Options{PushCooldown: 30 * time.Second})
+	cfg := monitor.DefaultConfig()
+	// This test counts alert notifications; danger (which adds its own
+	// notification) has its own test, TestDangerFlow.
+	cfg.DangerScore = 1e9
+	srv := New(st, pushes, cfg, Options{PushCooldown: 30 * time.Second})
 	clock := time.Now()
 	srv.now = func() time.Time { return clock }
 	h := srv.Handler()

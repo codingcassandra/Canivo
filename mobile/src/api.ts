@@ -1,6 +1,6 @@
 // Client for the Canivo Go server. Types mirror internal/api and internal/store.
 
-export type State = 'calibrating' | 'calm' | 'alert';
+export type State = 'calibrating' | 'calm' | 'alert' | 'danger';
 
 export type Baseline = {
   rate_mean: number;

@@ -137,7 +137,7 @@ export function LoginScreen({ initialServer, notice, onSignedIn }: Props) {
             </Pressable>
 
             {error && (
-              <View style={[styles.banner, { backgroundColor: tones.alert.soft, marginTop: 14 }]}>
+              <View style={[styles.banner, { backgroundColor: tones.warning.soft, marginTop: 14 }]}>
                 <Icon name="alert-circle" color={colors.error} />
                 <T style={{ flex: 1, color: colors.error }}>{error}</T>
               </View>

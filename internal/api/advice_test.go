@@ -62,8 +62,8 @@ func TestAlertTip(t *testing.T) {
 	st.SetAlertTip(ctx, old, "Scatter a few treats for Rex to sniff out.")
 	now, _ := st.StartAlert(ctx, store.Alert{DogID: dog.ID, StartedAt: time.Now()})
 
-	body := alertBody("Rex", ev, b, s.suggest(dog.ID, now, ev, b))
-	if body != "Breathing 34 bpm (usually 18), muscle tension up 40%. Ask Rex to sit and reward him." {
+	body := alertBody("Rex", s.suggest(dog.ID, now, ev, b))
+	if body != "Ask Rex to sit and reward him." {
 		t.Errorf("body = %q", body)
 	}
 	g := a.got
@@ -82,7 +82,7 @@ func TestAlertTip(t *testing.T) {
 	// A failing advisor (or none) falls back to the fixed wording.
 	s, st = newServer(t, &fakeAdvisor{err: errors.New("quota")})
 	dog, _ = st.CreateDog(ctx, "Rex", 0)
-	if body := alertBody("Rex", ev, b, s.suggest(dog.ID, 1, ev, b)); !strings.HasSuffix(body, "Time to redirect Rex.") {
+	if body := alertBody("Rex", s.suggest(dog.ID, 1, ev, b)); body != "Time to redirect Rex." {
 		t.Errorf("fallback body = %q", body)
 	}
 	s, _ = newServer(t, nil)

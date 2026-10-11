@@ -37,7 +37,7 @@ export function BreathChart({ points, baseline, windowMs }: Props) {
       <View style={styles.legend}>
         <LegendItem color={colors.primary} label="breaths / min" />
         {baseline ? <LegendItem color={colors.accentDeep} label={`usual ${Math.round(baseline)}`} dashed /> : null}
-        {points.some((p) => p.state === 'alert') ? <LegendItem color={tones.alert.glow} label="alert" block /> : null}
+        {points.some((p) => isAlerting(p.state)) ? <LegendItem color={tones.alert.glow} label="alert" block /> : null}
       </View>
       <View onLayout={(e) => setWidth(e.nativeEvent.layout.width)}>
         {width > 0 && (
@@ -107,12 +107,17 @@ function smoothPath(pts: number[][]): string {
   return d + ` L ${last[0]} ${last[1]}`;
 }
 
+// Danger is a stronger alert, so it is shaded as part of the same period.
+function isAlerting(state: string) {
+  return state === 'alert' || state === 'danger';
+}
+
 function alertSpans(points: Point[]): [number, number][] {
   const spans: [number, number][] = [];
   let begin: number | null = null;
   points.forEach((p, i) => {
-    if (p.state === 'alert' && begin === null) begin = p.t;
-    const ends = p.state !== 'alert' || i === points.length - 1;
+    if (isAlerting(p.state) && begin === null) begin = p.t;
+    const ends = !isAlerting(p.state) || i === points.length - 1;
     if (begin !== null && ends) {
       spans.push([begin, p.t]);
       begin = null;

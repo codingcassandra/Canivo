@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { AlertRecord, Baseline, Client, Dog, DogLocation, Status } from './api';
-import { BreathChart, Point } from './BreathChart';
+import { AlertRecord, Client, Dog, DogLocation, Status } from './api';
 import { BreathingRing } from './BreathingRing';
 import { ChatScreen } from './ChatScreen';
 import { confirm } from './confirm';
@@ -16,7 +15,6 @@ import { ago, fmtDistance } from './units';
 
 const RETRY_MS = 2000;
 const OFFLINE_AFTER_MS = 10000;
-const CHART_WINDOW_MS = 5 * 60 * 1000;
 const LOCATION_POLL_MS = 5000;
 // The calming tip is written after the alert starts; check back for it this long.
 const TIP_WAIT_MS = 30000;
@@ -31,7 +29,6 @@ type Props = {
 export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
   const [dog, setDog] = useState<Dog | null>(null);
   const [status, setStatus] = useState<Status | null>(null);
-  const [history, setHistory] = useState<Point[]>([]);
   const [alerts, setAlerts] = useState<AlertRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [push, setPush] = useState<PushState | null>(null);
@@ -52,10 +49,6 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
     (s: Status) => {
       setStatus(s);
       setError(null);
-      if (!isOffline(s) && s.rate_bpm > 0) {
-        const now = Date.now();
-        setHistory((h) => [...h.filter((p) => p.t > now - CHART_WINDOW_MS), { t: now, rate: s.rate_bpm, state: s.state }]);
-      }
       if (s.state !== lastState.current) {
         lastState.current = s.state;
         refreshAlerts().catch(() => {});
@@ -118,8 +111,9 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
   }, [client, dogId, applyStatus, pollLocation, refreshAlerts]);
 
   // The open alert, and its calming tip once the server has written it.
-  const openAlert = status?.state === 'alert' ? alerts.find((a) => a.id === status.alert_id) : undefined;
-  const waitingForTip = status?.state === 'alert' && !!status.alert_id && !openAlert?.tip;
+  const alerting = status?.state === 'alert' || status?.state === 'danger';
+  const openAlert = alerting ? alerts.find((a) => a.id === status.alert_id) : undefined;
+  const waitingForTip = alerting && !!status.alert_id && !openAlert?.tip;
   const tipSince = openAlert?.started_at;
   useEffect(() => {
     if (!waitingForTip) return;
@@ -145,7 +139,6 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
       `Make sure ${name} is calm and relaxed. The next 2 minutes become the new normal.`,
       'Recalibrate',
       () => {
-        setHistory([]);
         client.recalibrate(dogId).then(setStatus, (e) => setError(e.message));
       },
     );
@@ -199,7 +192,6 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
 
   const offline = !status || isOffline(status);
   const tone = offline ? tones.offline : tones[status.state];
-  const baseline = status?.baseline;
 
   return (
     <ScrollView
@@ -231,7 +223,7 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
           <View style={styles.awayBanner}>
             <View style={styles.awayTop}>
               <View style={styles.awayIcon}>
-                <Icon name="run-fast" size={24} color={tones.alert.fg} />
+                <Icon name="run-fast" size={24} color={tones.warning.fg} />
               </View>
               <View style={{ flex: 1 }}>
                 <T variant="heading" style={{ color: '#fff' }}>
@@ -243,7 +235,7 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
               </View>
             </View>
             <Pressable onPress={() => openDirections(loc.last!)} style={({ pressed }) => [styles.awayButton, pressed && { opacity: 0.85 }]}>
-              <Icon name="directions" color={tones.alert.fg} />
+              <Icon name="directions" color={tones.warning.fg} />
               <Text style={styles.awayButtonText}>Get directions</Text>
             </Pressable>
           </View>
@@ -252,39 +244,10 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
         <BreathingRing
           tone={tone}
           rateBpm={offline ? 0 : (status?.rate_bpm ?? 0)}
-          value={offline || !status?.rate_bpm ? '–' : String(Math.round(status.rate_bpm))}
-          unit={offline || !status?.rate_bpm ? undefined : 'bpm'}
           caption={tone.label}
         />
 
         {status && <Message name={name} status={status} offline={offline} tone={tone} tip={openAlert?.tip} />}
-
-        {baseline && !offline && status.state !== 'calibrating' && (
-          <View style={styles.metrics}>
-            <Metric
-              icon="lungs"
-              tint={tones.calm}
-              label="Breathing"
-              value={`${Math.round(status.rate_bpm)}`}
-              sub={`usually ${Math.round(baseline.rate_mean)}`}
-            />
-            <Metric
-              icon="arm-flex"
-              tint={{ ...tones.calibrating, fg: colors.accentDeep, soft: colors.accentSoft }}
-              label="Tension"
-              value={signedPct(status.tension, baseline.tension_mean)}
-              sub="vs normal"
-            />
-            <Metric
-              icon="gauge"
-              tint={status.score >= 2.5 ? tones.alert : { ...tones.alert, fg: colors.primary, soft: colors.primarySoft }}
-              label="Arousal"
-              value={status.score.toFixed(1)}
-              sub="alert at 2.5"
-              meter={Math.min(1, status.score / 2.5)}
-            />
-          </View>
-        )}
 
         <Pressable onPress={() => setPage('chat')} style={({ pressed }) => [styles.askCard, pressed && { opacity: 0.85 }]}>
           <View style={styles.askIcon}>
@@ -298,11 +261,6 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
           </View>
           <Icon name="chevron-right" size={26} color="#fff" />
         </Pressable>
-
-        <Card style={styles.section}>
-          <SectionTitle icon="heart-pulse" title="Last 5 minutes" />
-          <BreathChart points={history} baseline={baseline?.rate_mean} windowMs={CHART_WINDOW_MS} />
-        </Card>
 
         {/* GPS tracking only shows once a GPS collar has sent a location, so
             the app never suggests it can track a dog it can't. */}
@@ -344,7 +302,7 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
             alerts
               .slice(0, 8)
               .map((a, i) => (
-                <AlertRow key={a.id} alert={a} baseline={baseline} last={i === Math.min(alerts.length, 8) - 1} />
+                <AlertRow key={a.id} alert={a} last={i === Math.min(alerts.length, 8) - 1} />
               ))
           )}
         </Card>
@@ -395,11 +353,6 @@ function greeting() {
   return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
 }
 
-function signedPct(value: number, mean: number) {
-  const pct = mean > 0 ? Math.round((value / mean - 1) * 100) : 0;
-  return `${pct > 0 ? '+' : ''}${pct}%`;
-}
-
 // One line about the dog's profile, or a nudge to fill it in.
 function profileSummary(dog: Dog) {
   const p = dog.profile ?? {};
@@ -433,6 +386,10 @@ function Message({
     body = status.last_seen
       ? `No readings since ${new Date(status.last_seen).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}. Check the harness and bridge.`
       : `Once ${name}'s harness is on and sending data, you'll see their breathing here.`;
+  } else if (status.state === 'danger') {
+    icon = 'alert-octagon';
+    title = `${name} is in danger`;
+    body = tip ?? `Go to ${name} now. Move them somewhere calm and quiet, and call a vet if they don't settle.`;
   } else if (status.state === 'alert') {
     icon = 'alert-circle';
     title = `Redirect ${name} now`;
@@ -443,9 +400,7 @@ function Message({
     body = `Keep ${name} relaxed for a couple of minutes while we learn what calm looks like.`;
   } else {
     title = `${name} is relaxed`;
-    body = status.baseline
-      ? `Breathing is right around their usual ${Math.round(status.baseline.rate_mean)} breaths per minute.`
-      : 'Breathing looks normal.';
+    body = 'Breathing looks normal.';
   }
 
   return (
@@ -468,42 +423,6 @@ function Message({
   );
 }
 
-function Metric({
-  icon,
-  tint,
-  label,
-  value,
-  sub,
-  meter,
-}: {
-  icon: IconName;
-  tint: Tone;
-  label: string;
-  value: string;
-  sub: string;
-  meter?: number;
-}) {
-  return (
-    <Card style={styles.metric}>
-      <View style={[styles.metricIcon, { backgroundColor: tint.soft }]}>
-        <Icon name={icon} size={18} color={tint.fg} />
-      </View>
-      <T variant="caption" style={{ marginTop: 10 }}>
-        {label}
-      </T>
-      <T style={styles.metricValue}>{value}</T>
-      {meter !== undefined ? (
-        <View style={[styles.track, { marginTop: 6, height: 6 }]}>
-          <View style={[styles.fill, { width: `${meter * 100}%`, height: 6, backgroundColor: tint.fg }]} />
-        </View>
-      ) : null}
-      <T variant="caption" style={{ marginTop: 4, fontSize: 12 }}>
-        {sub}
-      </T>
-    </Card>
-  );
-}
-
 function SectionTitle({ icon, title }: { icon: IconName; title: string }) {
   return (
     <View style={styles.sectionTitle}>
@@ -515,7 +434,7 @@ function SectionTitle({ icon, title }: { icon: IconName; title: string }) {
   );
 }
 
-function AlertRow({ alert, baseline, last }: { alert: AlertRecord; baseline?: Baseline; last: boolean }) {
+function AlertRow({ alert, last }: { alert: AlertRecord; last: boolean }) {
   const start = new Date(alert.started_at);
   const ongoing = !alert.ended_at;
   let duration = 'ongoing';
@@ -531,7 +450,7 @@ function AlertRow({ alert, baseline, last }: { alert: AlertRecord; baseline?: Ba
       <View style={{ flex: 1 }}>
         <T style={{ fontFamily: fonts.bold }}>{dayLabel(start)}</T>
         <T variant="caption">
-          {start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · {trigger(alert, baseline)}
+          {start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
         </T>
         {alert.tip && (
           <T variant="caption" style={styles.alertTip}>
@@ -546,15 +465,6 @@ function AlertRow({ alert, baseline, last }: { alert: AlertRecord; baseline?: Ba
       />
     </View>
   );
-}
-
-// What set the alert off: whichever reading was furthest from the dog's normal.
-function trigger(a: AlertRecord, b?: Baseline) {
-  const bpm = `${Math.round(a.rate_bpm)} bpm`;
-  if (!b) return bpm;
-  const zRate = Math.abs(a.rate_bpm - b.rate_mean) / b.rate_sd;
-  const zTension = (a.tension - b.tension_mean) / b.tension_sd;
-  return zTension > zRate ? `tension ${signedPct(a.tension, b.tension_mean)}` : bpm;
 }
 
 function dayLabel(d: Date) {
@@ -573,7 +483,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     alignItems: 'center',
-    backgroundColor: tones.alert.soft,
+    backgroundColor: tones.warning.soft,
     borderRadius: radius.sm,
     padding: 12,
     marginTop: 12,
@@ -582,10 +492,6 @@ const styles = StyleSheet.create({
   messageIcon: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
   track: { height: 8, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.8)', marginTop: 12, overflow: 'hidden' },
   fill: { height: 8, borderRadius: 4 },
-  metrics: { flexDirection: 'row', gap: 10, marginTop: 14 },
-  metric: { flex: 1, padding: 14 },
-  metricIcon: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
-  metricValue: { fontFamily: fonts.black, fontSize: 26, color: colors.text, fontVariant: ['tabular-nums'] },
   section: { marginTop: 14 },
   sectionIcon: {
     width: 30,
@@ -612,7 +518,7 @@ const styles = StyleSheet.create({
     marginTop: 14,
   },
   askIcon: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
-  awayBanner: { backgroundColor: tones.alert.fg, borderRadius: radius.md, padding: 16, marginTop: 12 },
+  awayBanner: { backgroundColor: tones.warning.fg, borderRadius: radius.md, padding: 16, marginTop: 12 },
   awayTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   awayIcon: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
   awayButton: {
@@ -625,5 +531,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  awayButtonText: { fontFamily: fonts.bold, fontSize: 17, color: tones.alert.fg },
+  awayButtonText: { fontFamily: fonts.bold, fontSize: 17, color: tones.warning.fg },
 });

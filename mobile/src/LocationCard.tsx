@@ -98,7 +98,7 @@ export function LocationCard({ client, dogId, name, loc, onChange }: Props) {
     icon = 'run-fast';
     title = `${name} is away`;
     sub = `${fmtDistance(loc.distance_m ?? 0)} from home · updated ${ago(last.at)}`;
-    tint = tones.alert;
+    tint = tones.warning;
   } else if (last) {
     icon = 'home-heart';
     title = `${name} is home`;
@@ -113,7 +113,7 @@ export function LocationCard({ client, dogId, name, loc, onChange }: Props) {
           <Icon name={icon} size={20} color={tint.fg} />
         </View>
         <View style={{ flex: 1 }}>
-          <T style={{ fontFamily: fonts.bold, color: loc.away ? tones.alert.fg : colors.text }}>{title}</T>
+          <T style={{ fontFamily: fonts.bold, color: loc.away ? tones.warning.fg : colors.text }}>{title}</T>
           <T variant="caption">{sub}</T>
         </View>
       </View>
