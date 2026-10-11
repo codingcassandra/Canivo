@@ -62,7 +62,7 @@ func TestGeminiSuggest(t *testing.T) {
 }
 
 func TestGeminiChat(t *testing.T) {
-	g, got, _ := fakeGemini(t, `{"candidates":[{"content":{"parts":[{"text":"## Snacks\n**Good picks** for Rex:\n- carrots\n\n\n\n- apple slices"}]}}]}`)
+	g, got, _ := fakeGemini(t, `{"candidates":[{"content":{"parts":[{"text":"## Snacks\n**Good picks** for Rex:\n- carrots\n\n\n\n* apple slices\n  1. plain salmon"}]}}]}`)
 	reply, err := g.Chat(context.Background(), rex, []store.ChatMessage{
 		{Role: "assistant", Text: "left over from a cleared question"},
 		{Role: "user", Text: "Hi"},
@@ -72,7 +72,7 @@ func TestGeminiChat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != "Snacks\nGood picks for Rex:\n- carrots\n\n- apple slices" {
+	if reply != "Snacks\nGood picks for Rex:\n• carrots\n\n• apple slices\n• plain salmon" {
 		t.Errorf("reply = %q", reply)
 	}
 	if len(got.Contents) != 3 || got.Contents[0].Role != "user" || got.Contents[1].Role != "model" ||

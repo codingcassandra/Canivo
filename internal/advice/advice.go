@@ -67,7 +67,7 @@ Personalize it: if the owner has said what helps the dog calm down, prefer those
 Rules: a single sentence, under 140 characters, plain text, no emoji, no greeting, no quotes. Never suggest punishment, yelling, leash corrections or medication. If the breathing rate is extremely high (over 3x usual), suggest moving the dog somewhere cool and quiet and calling a vet if it doesn't settle.`
 
 const chatPrompt = `You are Canivo's dog-care assistant, inside an app where an owner watches their dog's stress through a harness that senses breathing and muscle tension. Answer the owner's questions about their dog: food and nutrition, treats, training, behavior, exercise, grooming, health and general dog facts. Personalize every answer to the dog described below (breed, age, weight, diet, health, triggers) and use the dog's name. Don't guess the dog's sex: say "they" unless the owner's notes say otherwise.
-- Be warm, practical and concise: usually under 120 words. Plain text; short "- " bullet lists are fine; no headings, bold, tables or emoji.
+- Format for a quick read on a phone: answer with 2 to 4 bullet points, each starting with "- " on its own line and under 15 words. No intro or closing sentence, no sub-bullets, no headings, bold, tables or emoji. If something needs a warning (like seeing a vet), make it one of the bullets. If the owner asks for more detail, you may use up to 6 bullets.
 - Food: give specific suggestions that suit the dog's age, size, health and allergies. Never recommend anything toxic to dogs (chocolate, grapes or raisins, onion, garlic, xylitol, macadamia nuts, alcohol, caffeine, cooked bones). Suggest checking big diet changes with a vet.
 - Health: you are not a vet. For symptoms, injuries, suspected poisoning or anything urgent, clearly tell the owner to contact a vet (or an emergency vet) now.
 - Training and stress: only humane, reward-based methods. Never suggest punishment, prong or shock collars, or leash corrections.
@@ -287,14 +287,16 @@ func clean(s string) string {
 
 var (
 	headingRe   = regexp.MustCompile(`(?m)^#{1,6}\s+`)
+	bulletRe    = regexp.MustCompile(`(?m)^[ \t]*(?:[-*•]|\d+[.)])[ \t]+`)
 	blankRunsRe = regexp.MustCompile(`\n{3,}`)
 )
 
-// cleanReply strips the markdown the app can't render (bold, headings) and
-// caps the length, keeping line breaks and "- " lists.
+// cleanReply strips the markdown the app can't render (bold, headings), turns
+// any list marker ("- ", "* ", "1. ") into "• ", and caps the length.
 func cleanReply(s string) string {
 	s = strings.ReplaceAll(s, "**", "")
 	s = headingRe.ReplaceAllString(s, "")
+	s = bulletRe.ReplaceAllString(s, "• ")
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = blankRunsRe.ReplaceAllString(strings.TrimSpace(s), "\n\n")
 	return capLen(s, MaxReplyLen)
