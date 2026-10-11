@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { AlertRecord, Baseline, createClient, Dog, DogLocation, Status } from './api';
+import { AlertRecord, Baseline, Client, Dog, DogLocation, Status } from './api';
 import { BreathChart, Point } from './BreathChart';
 import { BreathingRing } from './BreathingRing';
 import { confirm } from './confirm';
@@ -8,7 +8,6 @@ import { hasFindMy, openFindMy } from './findMy';
 import { LocationCard, openDirections } from './LocationCard';
 import { enablePush } from './push';
 import { PushState } from './pushState';
-import { Settings } from './settings';
 import { colors, fonts, radius, Tone, tones } from './theme';
 import { Button, Card, Icon, IconName, Pill, T } from './ui';
 import { ago, fmtDistance } from './units';
@@ -19,17 +18,13 @@ const CHART_WINDOW_MS = 5 * 60 * 1000;
 const LOCATION_POLL_MS = 5000;
 
 type Props = {
-  settings: Settings;
+  client: Client;
+  dogId: number;
   onChangeDog: () => void;
+  onSignOut: () => void;
 };
 
-export function DogScreen({ settings, onChangeDog }: Props) {
-  const client = useMemo(
-    () => createClient(settings.serverUrl, settings.apiKey),
-    [settings.serverUrl, settings.apiKey],
-  );
-  const { dogId } = settings;
-
+export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
   const [dog, setDog] = useState<Dog | null>(null);
   const [status, setStatus] = useState<Status | null>(null);
   const [history, setHistory] = useState<Point[]>([]);
@@ -112,11 +107,17 @@ export function DogScreen({ settings, onChangeDog }: Props) {
       },
     );
 
+  // Leaving this dog: stop getting its alerts on this phone.
   const changeDog = async () => {
-    // Stop getting this dog's alerts on this phone.
     if (push?.status === 'on') await push.unregister().catch(() => {});
     onChangeDog();
   };
+
+  const signOut = () =>
+    confirm('Sign out?', `You won’t get alerts about ${name} on this device until you sign in again.`, 'Sign out', async () => {
+      if (push?.status === 'on') await push.unregister().catch(() => {});
+      onSignOut();
+    });
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -283,7 +284,8 @@ export function DogScreen({ settings, onChangeDog }: Props) {
 
         <View style={styles.footer}>
           <Button title="Recalibrate" icon="refresh" variant="soft" onPress={recalibrate} />
-          <Button title="Change dog or server" icon="swap-horizontal" variant="ghost" onPress={changeDog} />
+          <Button title="Switch dog" icon="swap-horizontal" variant="ghost" onPress={changeDog} />
+          <Button title="Sign out" icon="logout" variant="ghost" onPress={signOut} />
         </View>
       </View>
     </ScrollView>

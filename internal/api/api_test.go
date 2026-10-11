@@ -222,7 +222,7 @@ func TestWebPush(t *testing.T) {
 		t.Fatalf("key = %v", key)
 	}
 
-	dog, _ := st.CreateDog(context.Background(), "Rex")
+	dog, _ := st.CreateDog(context.Background(), "Rex", 0)
 	st.SetBaseline(context.Background(), dog.ID, &monitor.Baseline{RateMean: 18, RateSD: 2, TensionMean: 232, TensionSD: 12})
 	if code := do(t, h, "POST", "/api/dogs/1/web-push", `{"endpoint":"http://insecure","keys":{"p256dh":"p","auth":"a"}}`, nil); code != 400 {
 		t.Errorf("insecure endpoint accepted: %d", code)

@@ -53,7 +53,12 @@ export function Button({
   );
 }
 
-export function Field({ label, icon, ...input }: TextInputProps & { label: string; icon: IconName }) {
+export function Field({
+  label,
+  icon,
+  right,
+  ...input
+}: TextInputProps & { label: string; icon: IconName; right?: ReactNode }) {
   return (
     <View style={{ marginTop: 18 }}>
       <T variant="label" style={{ marginBottom: 8 }}>
@@ -62,6 +67,7 @@ export function Field({ label, icon, ...input }: TextInputProps & { label: strin
       <View style={styles.field}>
         <Icon name={icon} size={20} color={colors.faint} />
         <TextInput placeholderTextColor={colors.faint} {...input} style={styles.input} />
+        {right}
       </View>
     </View>
   );

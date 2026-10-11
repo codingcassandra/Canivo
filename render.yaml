@@ -18,5 +18,7 @@ services:
         sync: false
       - key: VAPID_SUBJECT
         sync: false # your email, e.g. you@example.com
+      - key: GEMINI_API_KEY
+        sync: false # optional: AI calming tips in alerts, from https://aistudio.google.com/apikey
       - key: ALLOWED_ORIGINS
         sync: false # the web app URL, e.g. https://canivo.vercel.app

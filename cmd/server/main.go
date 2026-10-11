@@ -3,8 +3,10 @@
 // Environment:
 //
 //	PORT               listen port (default 8090)
-//	API_KEY            secret clients must send as "Authorization: Bearer <key>";
-//	                   unset = no auth (local dev only)
+//	API_KEY            device key for the bridge / GPS collar, sent as
+//	                   "Authorization: Bearer <key>"; reaches every dog. Owners
+//	                   sign in with email + password instead.
+//	                   unset = requests without a token get full access (local dev only)
 //	DATABASE_URL       Postgres URL; if unset, uses SQLite at DB_PATH
 //	DB_PATH            SQLite file (default canivo.db)
 //	NOTIFIER           "expo" (default) or "log" to print pushes instead of sending
@@ -13,6 +15,9 @@
 //	VAPID_PUBLIC_KEY   } browser push (web app / iPhone Home Screen / Apple Watch);
 //	VAPID_PRIVATE_KEY  } generate with: go run ./cmd/vapidkeys
 //	VAPID_SUBJECT      contact email or https URL, required by Apple for web push
+//	GEMINI_API_KEY     adds an AI-written calming tip to alert pushes (from
+//	                   https://aistudio.google.com/apikey); unset = fixed wording
+//	GEMINI_MODEL       Gemini model (default gemini-3.5-flash-lite)
 //	ALLOWED_ORIGINS    comma-separated web app origins allowed to call the API,
 //	                   e.g. https://canivo.vercel.app
 package main
@@ -28,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/codingcassandra/Canivo/internal/advice"
 	"github.com/codingcassandra/Canivo/internal/api"
 	"github.com/codingcassandra/Canivo/internal/monitor"
 	"github.com/codingcassandra/Canivo/internal/notify"
@@ -57,7 +63,7 @@ func main() {
 
 	apiKey := strings.TrimSpace(os.Getenv("API_KEY")) // a pasted value may carry a stray space/newline
 	if apiKey == "" {
-		log.Print("WARNING: API_KEY not set; anyone who can reach this server can use it")
+		log.Print("WARNING: API_KEY not set; requests without a token get full access (local dev only)")
 	}
 
 	var n notify.Notifier = &notify.Expo{AccessToken: os.Getenv("EXPO_ACCESS_TOKEN")}
@@ -75,6 +81,11 @@ func main() {
 		opts.VAPIDPublicKey = pub
 	} else {
 		log.Print("web push disabled (VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY not set)")
+	}
+	if key := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); key != "" {
+		opts.Advisor = &advice.Gemini{APIKey: key, Model: os.Getenv("GEMINI_MODEL")}
+	} else {
+		log.Print("calming tips disabled (GEMINI_API_KEY not set)")
 	}
 	for _, o := range strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",") {
 		if o = strings.TrimSpace(o); o != "" {

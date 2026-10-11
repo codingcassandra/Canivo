@@ -1,11 +1,10 @@
-// Package api is Canivo's HTTP interface: register dogs, ingest sensor
+// Package api is Canivo's HTTP interface: owner accounts, register dogs, ingest sensor
 // samples and GPS fixes, read live status, location and alert history, set
 // the home safe zone, and register push tokens.
 package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/codingcassandra/Canivo/internal/advice"
 	"github.com/codingcassandra/Canivo/internal/breath"
 	"github.com/codingcassandra/Canivo/internal/geo"
 	"github.com/codingcassandra/Canivo/internal/monitor"
@@ -39,12 +39,15 @@ type Server struct {
 
 	mu   sync.Mutex
 	dogs map[int64]*dogRuntime
+
+	limiter loginLimiter
 }
 
 // dogRuntime is the in-memory live state for one dog.
 type dogRuntime struct {
 	mu        sync.Mutex
 	name      string
+	ownerID   int64 // 0 = no owner (only the API key can reach it)
 	mon       *monitor.Monitor
 	openAlert int64 // 0 when no alert is open
 	lastPush  time.Time
@@ -57,12 +60,16 @@ type dogRuntime struct {
 
 type Options struct {
 	PushCooldown time.Duration // min time between pushes per dog
-	// APIKey, if set, must be sent by every /api request as
-	// "Authorization: Bearer <APIKey>".
+	// APIKey is the shared key for devices (bridge, GPS collar), sent as
+	// "Authorization: Bearer <APIKey>". It can reach every dog. Owners use
+	// session tokens from /api/auth/login instead. Empty = requests without
+	// a token get full access (local development only).
 	APIKey string
 	// WebPush and VAPIDPublicKey enable browser push. Nil disables it.
 	WebPush        notify.WebPusher
 	VAPIDPublicKey string
+	// Advisor writes a calming tip for alert pushes. Nil = fixed wording.
+	Advisor advice.Advisor
 	// AllowedOrigins are web app origins (e.g. "https://canivo.vercel.app")
 	// allowed to call the API from a browser. "*" allows any.
 	AllowedOrigins []string
@@ -91,6 +98,10 @@ func (s *Server) Handler() http.Handler {
 			"note":    "This is the server. Open the Canivo web app to see your dog.",
 		})
 	})
+	mux.HandleFunc("POST /api/auth/register", s.register)
+	mux.HandleFunc("POST /api/auth/login", s.login)
+	mux.HandleFunc("POST /api/auth/logout", s.logout)
+	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("POST /api/dogs", s.createDog)
 	mux.HandleFunc("GET /api/dogs", s.listDogs)
 	mux.HandleFunc("GET /api/dogs/{id}", s.getDog)
@@ -107,7 +118,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/web-push/key", s.webPushKey)
 	mux.HandleFunc("POST /api/dogs/{id}/web-push", s.addWebPush)
 	mux.HandleFunc("POST /api/web-push/unsubscribe", s.removeWebPush)
-	return s.cors(s.requireKey(mux))
+	return s.cors(s.authenticate(mux))
 }
 
 // cors lets the web app, hosted on another domain, call the API. Preflight
@@ -139,21 +150,6 @@ func (s *Server) cors(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) requireKey(next http.Handler) http.Handler {
-	if s.opts.APIKey == "" {
-		return next
-	}
-	want := []byte("Bearer " + s.opts.APIKey)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") &&
-			subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), want) != 1 {
-			writeError(w, http.StatusUnauthorized, "missing or wrong API key")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 func (s *Server) createDog(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name string `json:"name"`
@@ -165,7 +161,7 @@ func (s *Server) createDog(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	d, err := s.store.CreateDog(r.Context(), req.Name)
+	d, err := s.store.CreateDog(r.Context(), req.Name, who(r).userID)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -174,7 +170,7 @@ func (s *Server) createDog(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listDogs(w http.ResponseWriter, r *http.Request) {
-	dogs, err := s.store.Dogs(r.Context())
+	dogs, err := s.store.Dogs(r.Context(), who(r).userID) // 0 (API key) = all dogs
 	if err != nil {
 		serverError(w, err)
 		return
@@ -183,7 +179,7 @@ func (s *Server) listDogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getDog(w http.ResponseWriter, r *http.Request) {
-	id, ok := dogID(w, r)
+	id, ok := s.dogID(w, r)
 	if !ok {
 		return
 	}
@@ -214,7 +210,7 @@ func (rt *dogRuntime) statusLocked(id int64) statusResponse {
 // ingest receives a batch of samples from the bridge, e.g.
 // {"samples":[{"t":123400,"v":212},{"t":123420,"v":215}]}
 func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
-	id, ok := dogID(w, r)
+	id, ok := s.dogID(w, r)
 	if !ok {
 		return
 	}
@@ -283,7 +279,7 @@ func (s *Server) handleEvent(ctx context.Context, dogID int64, rt *dogRuntime, e
 func (s *Server) push(dogID, alertID int64, name string, ev monitor.Event, b monitor.Baseline) {
 	s.send(dogID, notify.Message{
 		Title: name + " is on high alert",
-		Body:  alertBody(name, ev, b),
+		Body:  alertBody(name, ev, b, s.suggest(dogID, name, ev, b)),
 		Data:  map[string]any{"type": "alert", "dog_id": dogID, "alert_id": alertID},
 	})
 }
@@ -326,20 +322,47 @@ func (s *Server) send(dogID int64, msg notify.Message) {
 	}
 }
 
-// alertBody explains what tripped the alert relative to the dog's normal,
-// e.g. "Breathing 34 bpm (usually 18), muscle tension up 40%. Time to redirect Rex."
-func alertBody(name string, ev monitor.Event, b monitor.Baseline) string {
-	body := fmt.Sprintf("Breathing %.0f bpm (usually %.0f)", ev.RateBPM, b.RateMean)
-	if b.TensionMean > 0 {
-		if pct := (ev.Tension/b.TensionMean - 1) * 100; pct >= 10 {
-			body += fmt.Sprintf(", muscle tension up %.0f%%", pct)
-		}
+// suggest asks the advisor for a calming tip, or returns "" if there is no
+// advisor or it fails or is slow; the alert must still go out promptly.
+func (s *Server) suggest(dogID int64, name string, ev monitor.Event, b monitor.Baseline) string {
+	if s.opts.Advisor == nil {
+		return ""
 	}
-	return body + ". Time to redirect " + name + "."
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	tip, err := s.opts.Advisor.Suggest(ctx, advice.Situation{
+		Name: name, RateBPM: ev.RateBPM, UsualRateBPM: b.RateMean, TensionUpPct: tensionUpPct(ev, b),
+	})
+	if err != nil {
+		log.Printf("dog %d: calming tip: %v", dogID, err)
+		return ""
+	}
+	return tip
+}
+
+// alertBody explains what tripped the alert relative to the dog's normal, then
+// what to do, e.g. "Breathing 34 bpm (usually 18), muscle tension up 40%.
+// Time to redirect Rex." The tip, if any, replaces "Time to redirect Rex."
+func alertBody(name string, ev monitor.Event, b monitor.Baseline, tip string) string {
+	body := fmt.Sprintf("Breathing %.0f bpm (usually %.0f)", ev.RateBPM, b.RateMean)
+	if pct := tensionUpPct(ev, b); pct >= 10 {
+		body += fmt.Sprintf(", muscle tension up %.0f%%", pct)
+	}
+	if tip == "" {
+		tip = "Time to redirect " + name + "."
+	}
+	return body + ". " + tip
+}
+
+func tensionUpPct(ev monitor.Event, b monitor.Baseline) float64 {
+	if b.TensionMean <= 0 {
+		return 0
+	}
+	return (ev.Tension/b.TensionMean - 1) * 100
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	id, ok := dogID(w, r)
+	id, ok := s.dogID(w, r)
 	if !ok {
 		return
 	}
@@ -356,7 +379,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 // calibrate throws away the baseline. Call it while the dog is calm; the
 // next couple of minutes of samples become the new baseline.
 func (s *Server) calibrate(w http.ResponseWriter, r *http.Request) {
-	id, ok := dogID(w, r)
+	id, ok := s.dogID(w, r)
 	if !ok {
 		return
 	}
@@ -383,7 +406,7 @@ func (s *Server) calibrate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
-	id, ok := dogID(w, r)
+	id, ok := s.dogID(w, r)
 	if !ok {
 		return
 	}
@@ -409,7 +432,7 @@ func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) addPushToken(w http.ResponseWriter, r *http.Request) {
-	id, ok := dogID(w, r)
+	id, ok := s.dogID(w, r)
 	if !ok {
 		return
 	}
@@ -451,7 +474,7 @@ func (s *Server) webPushKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) addWebPush(w http.ResponseWriter, r *http.Request) {
-	id, ok := dogID(w, r)
+	id, ok := s.dogID(w, r)
 	if !ok {
 		return
 	}
@@ -524,7 +547,7 @@ func (rt *dogRuntime) locationLocked(id int64) locationResponse {
 // {"fixes":[{"t":1760000000000,"lat":40.7128,"lon":-74.0060,"accuracy_m":8}]}
 // and alerts the owner when the dog leaves the safe zone or comes back.
 func (s *Server) ingestFixes(w http.ResponseWriter, r *http.Request) {
-	id, ok := dogID(w, r)
+	id, ok := s.dogID(w, r)
 	if !ok {
 		return
 	}
@@ -604,7 +627,7 @@ func (s *Server) ingestFixes(w http.ResponseWriter, r *http.Request) {
 // location returns where the dog is, the safe zone, and the recent trail
 // (?minutes=, default 30, max 1440).
 func (s *Server) location(w http.ResponseWriter, r *http.Request) {
-	id, ok := dogID(w, r)
+	id, ok := s.dogID(w, r)
 	if !ok {
 		return
 	}
@@ -636,7 +659,7 @@ func (s *Server) location(w http.ResponseWriter, r *http.Request) {
 
 // setZone sets the safe zone, e.g. {"lat":40.7128,"lon":-74.0060,"radius_m":100}.
 func (s *Server) setZone(w http.ResponseWriter, r *http.Request) {
-	id, ok := dogID(w, r)
+	id, ok := s.dogID(w, r)
 	if !ok {
 		return
 	}
@@ -656,7 +679,7 @@ func (s *Server) setZone(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteZone(w http.ResponseWriter, r *http.Request) {
-	id, ok := dogID(w, r)
+	id, ok := s.dogID(w, r)
 	if !ok {
 		return
 	}
@@ -695,7 +718,7 @@ func (s *Server) runtime(ctx context.Context, id int64) (*dogRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
-	rt := &dogRuntime{name: d.Name, mon: monitor.New(s.cfg, d.Baseline)}
+	rt := &dogRuntime{name: d.Name, ownerID: d.OwnerID, mon: monitor.New(s.cfg, d.Baseline)}
 	if rt.zone, err = s.store.Zone(ctx, id); err != nil {
 		return nil, err
 	}
@@ -710,13 +733,48 @@ func (s *Server) runtime(ctx context.Context, id int64) (*dogRuntime, error) {
 	return rt, nil
 }
 
-func dogID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+// dogID parses the {id} in the path and checks the caller may see that dog.
+// Another owner's dog looks exactly like a missing one.
+func (s *Server) dogID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid dog id")
 		return 0, false
 	}
+	if p := who(r); !p.admin {
+		rt, err := s.runtime(r.Context(), id)
+		if err != nil {
+			storeError(w, err)
+			return 0, false
+		}
+		if rt.owner() != p.userID {
+			writeError(w, http.StatusNotFound, "dog not found")
+			return 0, false
+		}
+	}
 	return id, true
+}
+
+func (rt *dogRuntime) owner() int64 {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.ownerID
+}
+
+// refreshOwners reloads the owner of every dog already in memory.
+func (s *Server) refreshOwners(ctx context.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, rt := range s.dogs {
+		d, err := s.store.Dog(ctx, id)
+		if err != nil {
+			log.Printf("refresh owner of dog %d: %v", id, err)
+			continue
+		}
+		rt.mu.Lock()
+		rt.ownerID = d.OwnerID
+		rt.mu.Unlock()
+	}
 }
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {

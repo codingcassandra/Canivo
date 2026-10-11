@@ -81,9 +81,8 @@ npx expo start            # scan the QR code with the Expo Go app
 
 - Phone and computer must be on the same WiFi. The server URL is your
   computer's LAN IP (`ipconfig getifaddr en0`), pre-filled from
-  `mobile/.env.local` (`EXPO_PUBLIC_SERVER_URL=http://<ip>:8090`). Type the API
-  key on the setup screen. Don't set `EXPO_PUBLIC_API_KEY` for builds you share:
-  `EXPO_PUBLIC_*` values are embedded in the app.
+  `mobile/.env.local` (`EXPO_PUBLIC_SERVER_URL=http://<ip>:8090`). Sign in or
+  create an account; never put the `API_KEY` in the app.
 - **Push notifications** need a free Expo account, once: `npx eas-cli@latest login`
   then `npx eas-cli@latest init` inside `mobile/` (adds the project ID to `app.json`).
   On iPhone, Expo Go then receives pushes. On Android, Expo Go can't; use a
@@ -112,7 +111,7 @@ the Vercel URL and the `VAPID_*` vars (`go run ./cmd/vapidkeys`).
 | Var | Default | |
 |---|---|---|
 | `PORT` | `8090` | |
-| `API_KEY` | – | clients send `Authorization: Bearer <key>`; unset = no auth (local only) |
+| `API_KEY` | – | device key for the bridge/collar (`Authorization: Bearer <key>`), reaches every dog; unset = requests without a token get full access (local only) |
 | `DATABASE_URL` | – | Postgres URL; unset = SQLite at `DB_PATH` |
 | `DB_PATH` | `canivo.db` | SQLite file |
 | `NOTIFIER` | `expo` | `log` to print instead of sending |
@@ -120,6 +119,8 @@ the Vercel URL and the `VAPID_*` vars (`go run ./cmd/vapidkeys`).
 | `PUSH_COOLDOWN` | `2m` | min time between pushes per dog |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | – | browser push; generate with `go run ./cmd/vapidkeys` |
 | `VAPID_SUBJECT` | – | your email; required by Apple with VAPID keys |
+| `GEMINI_API_KEY` | – | adds a Gemini-written calming tip to alert pushes ([get a key](https://aistudio.google.com/apikey)); unset = "Time to redirect …" |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | |
 | `ALLOWED_ORIGINS` | – | comma-separated web app URLs allowed to call the API |
 
 ## Deploy (Render + Supabase)
@@ -136,21 +137,42 @@ host (not serverless like Vercel).
 3. Copy the generated `API_KEY` from the service's **Environment** tab and check
    `https://<your-service>.onrender.com/health`.
 4. **Bridge:** `go run ./cmd/bridge -server https://<your-service>.onrender.com -key <API_KEY> -dog 1 -simulate`
-5. **App:** enter the Render URL and API key on the setup screen.
+5. **App:** create your account. Do this first: the first account created
+   takes over any dogs made before accounts existed.
 
 Free tier notes: Render sleeps after 15 min with no requests (a running bridge
 keeps it awake; waking takes ~30 s). Supabase pauses a project after a week of
 no database activity.
 
+## Accounts
+
+Owners sign in with email and password and see only their own dogs. Passwords
+are stored as bcrypt hashes. A sign-in gives the app a random session token;
+only its SHA-256 hash is stored.
+
+- **Remember me** (on by default): the token is saved on the device and lasts
+  90 days from the last time the app was used, so regular users never have to
+  sign in again. Off: the token is only kept in memory (closing the app signs
+  you out) and expires after 12 hours on the server.
+- **Sign out** ends that device's session on the server and stops its push alerts.
+- After 10 wrong passwords for an email, signing in to it is blocked for 15 minutes.
+- **Devices** (bridge, GPS collar) still use the shared `API_KEY`, which can
+  reach every dog. Keep it out of the app.
+
 ## API
 
-All `/api/*` routes need `Authorization: Bearer <API_KEY>` when the server has one.
+`/api/*` routes need `Authorization: Bearer <token>`: a session token from
+sign-in, or the `API_KEY` (devices). Only register and login are open.
 
 | Method | Path | Body / notes |
 |---|---|---|
 | GET | `/health` | |
-| POST | `/api/dogs` | `{"name":"Rex"}` |
-| GET | `/api/dogs`, `/api/dogs/{id}` | includes learned baseline |
+| POST | `/api/auth/register` | `{"email","password","remember"}` → `{"token","expires_at","user"}`; password 8–72 chars |
+| POST | `/api/auth/login` | same body and response; 401 wrong email or password, 429 after too many tries |
+| POST | `/api/auth/logout` | ends this token's session |
+| GET | `/api/me` | the signed-in owner |
+| POST | `/api/dogs` | `{"name":"Rex"}`, owned by the signed-in owner |
+| GET | `/api/dogs`, `/api/dogs/{id}` | your dogs (all dogs with the API key); includes learned baseline. Another owner's dog is a 404 |
 | POST | `/api/dogs/{id}/samples` | `{"samples":[{"t":<millis>,"v":<value>}]}` (≤ 5000) → status |
 | GET | `/api/dogs/{id}/status` | `state` (`calibrating`/`calm`/`alert`), `rate_bpm`, `tension`, `score`, `calibration_progress` |
 | POST | `/api/dogs/{id}/calibrate` | forget baseline, relearn from the next 2 min |
@@ -187,7 +209,8 @@ mobile/         Expo app: iOS/Android + web (Vercel)
 
 ## Not done yet
 
-- **Accounts** – one shared API key protects the server, but everyone with it sees every dog. Add owner accounts before real users.
+- **Password reset** – there's no email service yet, so a forgotten password can't be reset from the app.
+- **Per-device keys** – every bridge/collar shares one `API_KEY` that reaches every dog. Fine for one household; real users each need their own device keys.
 - **Wireless** – the Nano R3 has no radio. Options: HC-05/HM-10 Bluetooth module → phone, or swap to an ESP32 / Nano 33 IoT / Nano ESP32 that posts directly.
 - **GPS collar hardware** – the server and app are ready, but no collar firmware yet. A dog that runs away is out of Wi-Fi range, so the collar needs cellular (e.g. an ESP32 board with a SIM7000G/SIM7080G LTE-M + GNSS modem and a data SIM). It just POSTs to `/api/dogs/{id}/locations` every few seconds.
 - **Tuning on a real dog** – thresholds come from synthetic data. Exercise, heat-panting and barking also change breathing; expect to tune `monitor.DefaultConfig()`.

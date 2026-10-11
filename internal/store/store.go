@@ -1,4 +1,4 @@
-// Package store persists dogs, their baselines, alerts, safe zones, recent
+// Package store persists owner accounts and sessions, dogs, their baselines, alerts, safe zones, recent
 // GPS fixes and owners' push tokens in SQLite (local dev) or Postgres (deployed). Raw sensor samples are
 // not stored. Queries use $N placeholders, which both databases accept.
 package store
@@ -18,10 +18,20 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound = errors.New("not found")
+	ErrExists   = errors.New("already exists")
+)
+
+type User struct {
+	ID        int64     `json:"id"`
+	Email     string    `json:"email"`
+	CreatedAt time.Time `json:"created_at"`
+}
 
 type Dog struct {
 	ID        int64             `json:"id"`
+	OwnerID   int64             `json:"-"` // 0 = no owner yet
 	Name      string            `json:"name"`
 	CreatedAt time.Time         `json:"created_at"`
 	Baseline  *monitor.Baseline `json:"baseline,omitempty"`
@@ -41,6 +51,19 @@ type Store struct{ db *sql.DB }
 
 // {{ID}} and {{FLOAT}} are filled in per database by Open.
 const schema = `
+CREATE TABLE IF NOT EXISTS users (
+	id            {{ID}},
+	email         TEXT NOT NULL UNIQUE,
+	password_hash TEXT NOT NULL,
+	created_at    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+	token_hash TEXT PRIMARY KEY,
+	user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	ttl_ms     BIGINT NOT NULL,
+	expires_ms BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
 CREATE TABLE IF NOT EXISTS dogs (
 	id         {{ID}},
 	name       TEXT NOT NULL,
@@ -91,6 +114,8 @@ CREATE INDEX IF NOT EXISTS locations_dog ON locations(dog_id, at_ms);`
 // stops the auto-generated public REST API (anon key) from reading the
 // tables; the server connects as the table owner, so it is unaffected.
 const pgLockdown = `
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE dogs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE alerts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE push_tokens ENABLE ROW LEVEL SECURITY;
@@ -121,25 +146,40 @@ func Open(dsn string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// Databases created before accounts existed have no dogs.owner_id.
+	if _, err := db.Exec(`SELECT owner_id FROM dogs LIMIT 0`); err != nil {
+		if _, err := db.Exec(`ALTER TABLE dogs ADD COLUMN owner_id BIGINT REFERENCES users(id) ON DELETE CASCADE`); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	return &Store{db: db}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) CreateDog(ctx context.Context, name string) (Dog, error) {
-	d := Dog{Name: name, CreatedAt: time.Now().UTC()}
-	err := s.db.QueryRowContext(ctx, `INSERT INTO dogs(name, created_at) VALUES ($1, $2) RETURNING id`,
-		name, fmtTime(d.CreatedAt)).Scan(&d.ID)
+// CreateDog adds a dog. ownerID 0 creates it without an owner.
+func (s *Store) CreateDog(ctx context.Context, name string, ownerID int64) (Dog, error) {
+	d := Dog{Name: name, OwnerID: ownerID, CreatedAt: time.Now().UTC()}
+	err := s.db.QueryRowContext(ctx, `INSERT INTO dogs(name, created_at, owner_id) VALUES ($1, $2, $3) RETURNING id`,
+		name, fmtTime(d.CreatedAt), nullID(ownerID)).Scan(&d.ID)
 	return d, err
 }
 
+const dogCols = `id, name, created_at, baseline, owner_id`
+
 func (s *Store) Dog(ctx context.Context, id int64) (Dog, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, created_at, baseline FROM dogs WHERE id = $1`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT `+dogCols+` FROM dogs WHERE id = $1`, id)
 	return scanDog(row)
 }
 
-func (s *Store) Dogs(ctx context.Context) ([]Dog, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, created_at, baseline FROM dogs ORDER BY id`)
+// Dogs lists every dog (ownerID 0) or one owner's dogs.
+func (s *Store) Dogs(ctx context.Context, ownerID int64) ([]Dog, error) {
+	q, args := `SELECT `+dogCols+` FROM dogs ORDER BY id`, []any{}
+	if ownerID != 0 {
+		q, args = `SELECT `+dogCols+` FROM dogs WHERE owner_id = $1 ORDER BY id`, []any{ownerID}
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -353,19 +393,133 @@ func (s *Store) Fixes(ctx context.Context, dogID int64, since time.Time, limit i
 	return fixes, rows.Err()
 }
 
+// CreateUser adds an account. email must already be normalized.
+func (s *Store) CreateUser(ctx context.Context, email, passwordHash string) (User, error) {
+	u := User{Email: email, CreatedAt: time.Now().UTC()}
+	if _, _, err := s.UserByEmail(ctx, email); err == nil {
+		return User{}, ErrExists
+	}
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO users(email, password_hash, created_at) VALUES ($1, $2, $3) RETURNING id`,
+		email, passwordHash, fmtTime(u.CreatedAt)).Scan(&u.ID)
+	if err != nil && isUniqueViolation(err) { // lost a race with the same email
+		return User{}, ErrExists
+	}
+	return u, err
+}
+
+// UserByEmail returns the account and its password hash.
+func (s *Store) UserByEmail(ctx context.Context, email string) (User, string, error) {
+	var u User
+	var hash, created string
+	err := s.db.QueryRowContext(ctx, `SELECT id, email, password_hash, created_at FROM users WHERE email = $1`, email).
+		Scan(&u.ID, &u.Email, &hash, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, "", ErrNotFound
+	}
+	u.CreatedAt = parseTime(created)
+	return u, hash, err
+}
+
+func (s *Store) User(ctx context.Context, id int64) (User, error) {
+	var u User
+	var created string
+	err := s.db.QueryRowContext(ctx, `SELECT id, email, created_at FROM users WHERE id = $1`, id).
+		Scan(&u.ID, &u.Email, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrNotFound
+	}
+	u.CreatedAt = parseTime(created)
+	return u, err
+}
+
+// CountUsers is used to give dogs from before accounts existed to the first account.
+func (s *Store) CountUsers(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&n)
+	return n, err
+}
+
+// ClaimOrphanDogs gives every dog without an owner to the user.
+func (s *Store) ClaimOrphanDogs(ctx context.Context, userID int64) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE dogs SET owner_id = $1 WHERE owner_id IS NULL`, userID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// Session is a signed-in device. Only a hash of its token is stored, so a
+// leaked database can't be used to sign in.
+type Session struct {
+	UserID  int64
+	TTL     time.Duration // how long it lasts after each use
+	Expires time.Time
+}
+
+func (s *Store) CreateSession(ctx context.Context, tokenHash string, userID int64, ttl time.Duration, now time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO sessions(token_hash, user_id, ttl_ms, expires_ms) VALUES ($1, $2, $3, $4)`,
+		tokenHash, userID, ttl.Milliseconds(), now.Add(ttl).UnixMilli())
+	return err
+}
+
+// Session returns an unexpired session, or ErrNotFound.
+func (s *Store) Session(ctx context.Context, tokenHash string, now time.Time) (Session, error) {
+	var ss Session
+	var ttl, exp int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT user_id, ttl_ms, expires_ms FROM sessions WHERE token_hash = $1 AND expires_ms > $2`,
+		tokenHash, now.UnixMilli()).Scan(&ss.UserID, &ttl, &exp)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Session{}, ErrNotFound
+	}
+	ss.TTL, ss.Expires = time.Duration(ttl)*time.Millisecond, time.UnixMilli(exp)
+	return ss, err
+}
+
+func (s *Store) ExtendSession(ctx context.Context, tokenHash string, expires time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET expires_ms = $1 WHERE token_hash = $2`, expires.UnixMilli(), tokenHash)
+	return err
+}
+
+func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = $1`, tokenHash)
+	return err
+}
+
+func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_ms <= $1`, now.UnixMilli())
+	return err
+}
+
+func isUniqueViolation(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique") || strings.Contains(msg, "duplicate key")
+}
+
+func nullID(id int64) any {
+	if id == 0 {
+		return nil
+	}
+	return id
+}
+
 type scanner interface{ Scan(...any) error }
 
 func scanDog(r scanner) (Dog, error) {
 	var d Dog
 	var created string
 	var baseline sql.NullString
-	if err := r.Scan(&d.ID, &d.Name, &created, &baseline); err != nil {
+	var owner sql.NullInt64
+	if err := r.Scan(&d.ID, &d.Name, &created, &baseline, &owner); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Dog{}, ErrNotFound
 		}
 		return Dog{}, err
 	}
 	d.CreatedAt = parseTime(created)
+	d.OwnerID = owner.Int64
 	if baseline.Valid {
 		d.Baseline = &monitor.Baseline{}
 		if err := json.Unmarshal([]byte(baseline.String), d.Baseline); err != nil {

@@ -55,12 +55,22 @@ export type DogLocation = {
   trail?: Fix[]; // oldest first
 };
 
+export type User = { id: number; email: string; created_at: string };
+
+export type AuthResult = { token: string; expires_at: string; user: User };
+
 export class ApiError extends Error {}
 
-export function createClient(serverUrl: string, apiKey = '') {
-  // Accept "canivo.onrender.com" as well as the full "https://..." URL.
+// Accept "canivo.onrender.com" as well as the full "https://..." URL.
+export function normalizeServer(serverUrl: string) {
   const withScheme = /^https?:\/\//i.test(serverUrl) ? serverUrl : `https://${serverUrl}`;
-  const base = withScheme.replace(/\/+$/, '');
+  return withScheme.replace(/\/+$/, '');
+}
+
+// token is the session token from login/register. onSignedOut is called when
+// the server says the session is no longer valid (expired or signed out).
+export function createClient(serverUrl: string, token = '', onSignedOut?: () => void) {
+  const base = normalizeServer(serverUrl);
 
   async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const controller = new AbortController();
@@ -71,7 +81,7 @@ export function createClient(serverUrl: string, apiKey = '') {
         method,
         headers: {
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal,
@@ -84,6 +94,7 @@ export function createClient(serverUrl: string, apiKey = '') {
       clearTimeout(timer);
     }
     if (!res.ok) {
+      if (res.status === 401 && token) onSignedOut?.();
       const data = await res.json().catch(() => null);
       throw new ApiError(data?.error ?? `Server error ${res.status}`);
     }
@@ -91,6 +102,12 @@ export function createClient(serverUrl: string, apiKey = '') {
   }
 
   return {
+    register: (email: string, password: string, remember: boolean) =>
+      request<AuthResult>('POST', '/api/auth/register', { email, password, remember }),
+    login: (email: string, password: string, remember: boolean) =>
+      request<AuthResult>('POST', '/api/auth/login', { email, password, remember }),
+    logout: () => request<void>('POST', '/api/auth/logout'),
+    me: () => request<User>('GET', '/api/me'),
     listDogs: () => request<Dog[]>('GET', '/api/dogs'),
     createDog: (name: string) => request<Dog>('POST', '/api/dogs', { name }),
     getDog: (id: number) => request<Dog>('GET', `/api/dogs/${id}`),
