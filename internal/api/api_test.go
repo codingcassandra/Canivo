@@ -404,3 +404,48 @@ func TestLocationErrors(t *testing.T) {
 		t.Errorf("missing dog location: %d", code)
 	}
 }
+
+// GET /status?after= returns as soon as the status changes, instead of the
+// app polling every couple of seconds.
+func TestStatusWaitsForChange(t *testing.T) {
+	h, _ := setup(t)
+	do(t, h, "POST", "/api/dogs", `{"name":"Rex"}`, nil)
+	s := breath.NewSynth(18, 200)
+	var now int64
+	stream(t, h, "/api/dogs/1/samples", s, &now, 20000) // past the first full window
+
+	var st statusResponse
+	do(t, h, "GET", "/api/dogs/1/status", "", &st)
+	seq := st.Seq
+
+	// Nothing new: the request waits the full ?wait= and returns the same seq.
+	start := time.Now()
+	do(t, h, "GET", fmt.Sprintf("/api/dogs/1/status?after=%d&wait=1", seq), "", &st)
+	if waited := time.Since(start); waited < 900*time.Millisecond || st.Seq != seq {
+		t.Fatalf("idle wait returned after %v with seq %d (was %d)", waited, st.Seq, seq)
+	}
+
+	// New samples arrive 300 ms in: the waiting request returns right away.
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		stream(t, h, "/api/dogs/1/samples", s, &now, 2000)
+	}()
+	start = time.Now()
+	do(t, h, "GET", fmt.Sprintf("/api/dogs/1/status?after=%d&wait=10", seq), "", &st)
+	if waited := time.Since(start); waited > 2*time.Second || st.Seq <= seq {
+		t.Fatalf("change returned after %v with seq %d (was %d)", waited, st.Seq, seq)
+	}
+
+	// An app that is behind gets the current status immediately.
+	start = time.Now()
+	do(t, h, "GET", "/api/dogs/1/status?after=0&wait=10", "", &st)
+	if time.Since(start) > 500*time.Millisecond {
+		t.Fatal("stale seq waited")
+	}
+
+	for _, q := range []string{"after=x", "after=1&wait=11", "after=1&wait=-1"} {
+		if code := do(t, h, "GET", "/api/dogs/1/status?"+q, "", nil); code != 400 {
+			t.Errorf("%s: %d", q, code)
+		}
+	}
+}

@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"testing"
+	"time"
 
 	"github.com/codingcassandra/Canivo/internal/breath"
 )
@@ -86,10 +87,50 @@ func TestBriefSpikeDoesNotAlert(t *testing.T) {
 	feed(m, s, &now, 30000)
 
 	s.Tension = 320
-	evs := feed(m, s, &now, 2000) // 2s spike, under the 5s sustain
+	evs := feed(m, s, &now, 2000) // 2s spike, under the 3s sustain
 	s.Tension = 200
 	evs = append(evs, feed(m, s, &now, 30000)...)
 	if len(evs) != 0 {
 		t.Fatalf("brief spike produced %v", kinds(evs))
+	}
+}
+
+// How soon an alert fires after the dog changes, and that a calm dog never
+// alerts. These pin down the speed vs. false-alarm trade-off.
+func TestAlertLatency(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		rate, tension float64
+		within        time.Duration
+	}{
+		// Before the latency work these took 12, 12, 12 and 18 s.
+		{"fast breathing and tense", 40, 320, 7 * time.Second},
+		{"tense only", 18, 320, 7 * time.Second},
+		{"fast breathing only", 40, 200, 9 * time.Second},
+		{"moderate", 30, 260, 10 * time.Second},
+	} {
+		m := New(DefaultConfig(), nil)
+		s := breath.NewSynth(18, 200)
+		var now int64
+		feed(m, s, &now, 15000+2*60000+5000) // calibrate
+		s.RateBPM, s.Tension = c.rate, c.tension
+		start := now
+		for m.Status().State != Alert && now-start < 30000 {
+			feed(m, s, &now, 100)
+		}
+		if took := time.Duration(now-start) * time.Millisecond; m.Status().State != Alert || took > c.within {
+			t.Errorf("%s: alert after %v, want within %v (state %s)", c.name, took, c.within, m.Status().State)
+		}
+	}
+}
+
+func TestCalmDogNeverAlerts(t *testing.T) {
+	for _, rate := range []float64{8, 12, 18, 30} {
+		m := New(DefaultConfig(), nil)
+		s := breath.NewSynth(rate, 200)
+		var now int64
+		if evs := feed(m, s, &now, 30*60000); len(evs) != 1 || evs[0].Kind != Calibrated {
+			t.Errorf("calm dog at %v bpm for 30 min: events %v (status %+v)", rate, kinds(evs), m.Status())
+		}
 	}
 }

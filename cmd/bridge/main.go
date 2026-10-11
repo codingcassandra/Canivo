@@ -40,6 +40,7 @@ func main() {
 	simulate := flag.Bool("simulate", false, "generate fake breathing instead of reading serial")
 	calm := flag.Duration("calm", 3*time.Minute, "simulate: calm time before the first alert episode")
 	every := flag.Duration("every", 90*time.Second, "simulate: time between alert episodes")
+	send := flag.Duration("send", 200*time.Millisecond, "how often to send samples to the server (lower = less delay)")
 	flag.Parse()
 
 	if *list {
@@ -72,7 +73,7 @@ func main() {
 		log.Fatal("pass -port (or -simulate); use -list to see ports")
 	}
 
-	forward(fmt.Sprintf("%s/api/dogs/%d/samples", strings.TrimRight(*server, "/"), *dog), *key, samples)
+	forward(fmt.Sprintf("%s/api/dogs/%d/samples", strings.TrimRight(*server, "/"), *dog), *key, samples, *send)
 }
 
 // readSerial parses "millis,value" lines into samples.
@@ -138,13 +139,15 @@ func runSimulator(out chan<- breath.Sample, calm, every time.Duration) {
 	}
 }
 
-// forward batches samples once a second and POSTs them, printing state changes.
-func forward(url, key string, in <-chan breath.Sample) {
+// forward POSTs whatever samples have arrived every `every` (a slow network
+// just makes batches bigger), printing state changes and a status line a second.
+func forward(url, key string, in <-chan breath.Sample, every time.Duration) {
 	client := &http.Client{Timeout: 10 * time.Second}
-	tick := time.NewTicker(time.Second)
+	tick := time.NewTicker(every)
 	defer tick.Stop()
 	var batch []breath.Sample
 	lastState := ""
+	var lastLog time.Time
 	for {
 		select {
 		case s := <-in:
@@ -166,6 +169,10 @@ func forward(url, key string, in <-chan breath.Sample) {
 				log.Printf("state: %s", status.State)
 				lastState = status.State
 			}
+			if time.Since(lastLog) < time.Second {
+				continue
+			}
+			lastLog = time.Now()
 			log.Printf("%-11s rate=%5.1f bpm  tension=%6.1f  score=%4.1f  calibration=%3.0f%%",
 				status.State, status.RateBPM, status.Tension, status.Score, status.Calibration*100)
 		}

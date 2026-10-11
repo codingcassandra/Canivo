@@ -19,7 +19,7 @@ type Sample struct {
 type Features struct {
 	At      int64   `json:"at"`       // device ms of the newest sample
 	RateBPM float64 `json:"rate_bpm"` // breaths per minute
-	Tension float64 `json:"tension"`  // mean smoothed envelope over the window
+	Tension float64 `json:"tension"`  // mean smoothed envelope over the last TensionWindowMs
 	Breaths int     `json:"breaths"`  // breaths detected in the window
 	Ready   bool    `json:"ready"`    // false until a full window has been seen
 }
@@ -30,6 +30,13 @@ const (
 	minBreathGap  = 250    // ms; caps detection at 240 bpm
 	maxSampleGap  = 2000   // ms; a bigger gap (or a clock reset) restarts detection
 	triggerFactor = 0.5    // breath triggers at trend + 0.5 * running SD
+
+	// TensionWindowMs is how much signal tension is averaged over: long
+	// enough to span a breath or two, short enough to react within seconds.
+	TensionWindowMs = 6000
+	// rateIntervals is how many recent breath intervals the rate is
+	// averaged over, so the rate follows a change within a few breaths.
+	rateIntervals = 4
 )
 
 // Detector is not safe for concurrent use.
@@ -44,7 +51,7 @@ type Detector struct {
 	armed                   bool
 
 	breaths []int64  // breath onset times within the window
-	levels  []tlevel // smoothed values within the window
+	levels  []tlevel // smoothed values within the tension window
 	sum     float64  // running sum of levels[].v
 }
 
@@ -53,7 +60,8 @@ type tlevel struct {
 	v float64
 }
 
-// NewDetector returns a detector that reports features over windowMs.
+// NewDetector returns a detector that counts breaths over windowMs (and
+// averages tension over the shorter TensionWindowMs).
 func NewDetector(windowMs int64) *Detector {
 	return &Detector{windowMs: windowMs}
 }
@@ -103,7 +111,7 @@ func (d *Detector) Push(s Sample) {
 	}
 
 	d.addLevel(s.T, d.smooth)
-	d.trim(s.T - d.windowMs)
+	d.trim(s.T)
 }
 
 // Features returns the current window summary.
@@ -126,11 +134,13 @@ func (d *Detector) rate() float64 {
 	if n < 2 {
 		return countRate
 	}
-	// Mean breath interval is more precise than a raw count, but only while
-	// breathing is ongoing. If the dog has paused (e.g. holding its breath),
-	// fall back to the count so the rate drops.
-	span := float64(d.breaths[n-1] - d.breaths[0])
-	mean := span / float64(n-1)
+	// The mean of the last few breath intervals is more precise than a raw
+	// count and follows changes quickly, but only while breathing is
+	// ongoing. If the dog has paused (e.g. holding its breath), fall back to
+	// the count so the rate drops.
+	first := max(0, n-1-rateIntervals)
+	span := float64(d.breaths[n-1] - d.breaths[first])
+	mean := span / float64(n-1-first)
 	if float64(d.lastT-d.breaths[n-1]) > 2*mean {
 		return countRate
 	}
@@ -142,14 +152,16 @@ func (d *Detector) addLevel(t int64, v float64) {
 	d.sum += v
 }
 
-func (d *Detector) trim(cutoff int64) {
+func (d *Detector) trim(now int64) {
+	tensionCutoff := now - min(TensionWindowMs, d.windowMs)
 	i := 0
-	for i < len(d.levels) && d.levels[i].t < cutoff {
+	for i < len(d.levels) && d.levels[i].t < tensionCutoff {
 		d.sum -= d.levels[i].v
 		i++
 	}
 	d.levels = d.levels[i:]
 
+	cutoff := now - d.windowMs
 	j := 0
 	for j < len(d.breaths) && d.breaths[j] < cutoff {
 		j++

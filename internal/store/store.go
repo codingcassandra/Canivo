@@ -1,5 +1,5 @@
-// Package store persists owner accounts and sessions, dogs, their baselines, alerts, safe zones, recent
-// GPS fixes and owners' push tokens in SQLite (local dev) or Postgres (deployed). Raw sensor samples are
+// Package store persists owner accounts and sessions, dogs, their profiles and baselines, alerts, chat
+// history, safe zones, recent GPS fixes and owners' push tokens in SQLite (local dev) or Postgres (deployed). Raw sensor samples are
 // not stored. Queries use $N placeholders, which both databases accept.
 package store
 
@@ -35,6 +35,28 @@ type Dog struct {
 	Name      string            `json:"name"`
 	CreatedAt time.Time         `json:"created_at"`
 	Baseline  *monitor.Baseline `json:"baseline,omitempty"`
+	Profile   Profile           `json:"profile"`
+}
+
+// Profile is what the owner tells us about their dog, in their own words.
+// It personalizes the chat assistant and the calming tips in alerts.
+type Profile struct {
+	Breed    string `json:"breed,omitempty"`
+	Age      string `json:"age,omitempty"`
+	Weight   string `json:"weight,omitempty"`
+	Diet     string `json:"diet,omitempty"`     // food, treats, allergies
+	Health   string `json:"health,omitempty"`   // conditions, medication
+	Triggers string `json:"triggers,omitempty"` // what sets them off
+	Calming  string `json:"calming,omitempty"`  // what helps them settle
+	Notes    string `json:"notes,omitempty"`
+}
+
+// ChatMessage is one turn in the conversation with the assistant about a dog.
+type ChatMessage struct {
+	ID        int64     `json:"id"`
+	Role      string    `json:"role"` // "user" or "assistant"
+	Text      string    `json:"text"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type Alert struct {
@@ -45,6 +67,7 @@ type Alert struct {
 	Score     float64    `json:"score"`
 	RateBPM   float64    `json:"rate_bpm"`
 	Tension   float64    `json:"tension"`
+	Tip       string     `json:"tip,omitempty"` // calming tip sent with the push
 }
 
 type Store struct{ db *sql.DB }
@@ -108,7 +131,15 @@ CREATE TABLE IF NOT EXISTS locations (
 	lon        {{FLOAT}} NOT NULL,
 	accuracy_m {{FLOAT}} NOT NULL
 );
-CREATE INDEX IF NOT EXISTS locations_dog ON locations(dog_id, at_ms);`
+CREATE INDEX IF NOT EXISTS locations_dog ON locations(dog_id, at_ms);
+CREATE TABLE IF NOT EXISTS chat_messages (
+	id         {{ID}},
+	dog_id     BIGINT NOT NULL REFERENCES dogs(id) ON DELETE CASCADE,
+	role       TEXT NOT NULL,
+	text       TEXT NOT NULL,
+	created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_messages_dog ON chat_messages(dog_id, id);`
 
 // pgLockdown enables row-level security with no policies. On Supabase this
 // stops the auto-generated public REST API (anon key) from reading the
@@ -121,7 +152,8 @@ ALTER TABLE alerts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE push_tokens ENABLE ROW LEVEL SECURITY;
 ALTER TABLE web_push_subs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE zones ENABLE ROW LEVEL SECURITY;
-ALTER TABLE locations ENABLE ROW LEVEL SECURITY;`
+ALTER TABLE locations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;`
 
 // Open opens (and migrates) a database. dsn is either a Postgres URL
 // ("postgres://...") or a SQLite file path (":memory:" in tests).
@@ -146,14 +178,27 @@ func Open(dsn string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	// Databases created before accounts existed have no dogs.owner_id.
-	if _, err := db.Exec(`SELECT owner_id FROM dogs LIMIT 0`); err != nil {
-		if _, err := db.Exec(`ALTER TABLE dogs ADD COLUMN owner_id BIGINT REFERENCES users(id) ON DELETE CASCADE`); err != nil {
+	// Columns added after the first release.
+	for _, c := range []struct{ table, col, def string }{
+		{"dogs", "owner_id", "BIGINT REFERENCES users(id) ON DELETE CASCADE"},
+		{"dogs", "profile", "TEXT"},
+		{"alerts", "tip", "TEXT"},
+	} {
+		if err := addColumn(db, c.table, c.col, c.def); err != nil {
 			db.Close()
 			return nil, err
 		}
 	}
 	return &Store{db: db}, nil
+}
+
+// addColumn adds a column to an existing table unless it is already there.
+func addColumn(db *sql.DB, table, col, def string) error {
+	if _, err := db.Exec(`SELECT ` + col + ` FROM ` + table + ` LIMIT 0`); err == nil {
+		return nil
+	}
+	_, err := db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + def)
+	return err
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -166,7 +211,7 @@ func (s *Store) CreateDog(ctx context.Context, name string, ownerID int64) (Dog,
 	return d, err
 }
 
-const dogCols = `id, name, created_at, baseline, owner_id`
+const dogCols = `id, name, created_at, baseline, owner_id, profile`
 
 func (s *Store) Dog(ctx context.Context, id int64) (Dog, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT `+dogCols+` FROM dogs WHERE id = $1`, id)
@@ -208,12 +253,32 @@ func (s *Store) SetBaseline(ctx context.Context, dogID int64, b *monitor.Baselin
 	return err
 }
 
+func (s *Store) SetProfile(ctx context.Context, dogID int64, p Profile) error {
+	j, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE dogs SET profile = $1 WHERE id = $2`, string(j), dogID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) StartAlert(ctx context.Context, a Alert) (int64, error) {
 	var id int64
 	err := s.db.QueryRowContext(ctx,
 		`INSERT INTO alerts(dog_id, started_at, score, rate_bpm, tension) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
 		a.DogID, fmtTime(a.StartedAt), a.Score, a.RateBPM, a.Tension).Scan(&id)
 	return id, err
+}
+
+func (s *Store) SetAlertTip(ctx context.Context, id int64, tip string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE alerts SET tip = $1 WHERE id = $2`, tip, id)
+	return err
 }
 
 func (s *Store) EndAlert(ctx context.Context, id int64, at time.Time) error {
@@ -229,7 +294,7 @@ func (s *Store) EndOpenAlerts(ctx context.Context, at time.Time) error {
 
 func (s *Store) Alerts(ctx context.Context, dogID int64, limit int) ([]Alert, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, dog_id, started_at, ended_at, score, rate_bpm, tension
+		`SELECT id, dog_id, started_at, ended_at, score, rate_bpm, tension, tip
 		 FROM alerts WHERE dog_id = $1 ORDER BY started_at DESC, id DESC LIMIT $2`, dogID, limit)
 	if err != nil {
 		return nil, err
@@ -239,10 +304,11 @@ func (s *Store) Alerts(ctx context.Context, dogID int64, limit int) ([]Alert, er
 	for rows.Next() {
 		var a Alert
 		var started string
-		var ended sql.NullString
-		if err := rows.Scan(&a.ID, &a.DogID, &started, &ended, &a.Score, &a.RateBPM, &a.Tension); err != nil {
+		var ended, tip sql.NullString
+		if err := rows.Scan(&a.ID, &a.DogID, &started, &ended, &a.Score, &a.RateBPM, &a.Tension, &tip); err != nil {
 			return nil, err
 		}
+		a.Tip = tip.String
 		a.StartedAt = parseTime(started)
 		if ended.Valid {
 			t := parseTime(ended.String)
@@ -510,9 +576,9 @@ type scanner interface{ Scan(...any) error }
 func scanDog(r scanner) (Dog, error) {
 	var d Dog
 	var created string
-	var baseline sql.NullString
+	var baseline, profile sql.NullString
 	var owner sql.NullInt64
-	if err := r.Scan(&d.ID, &d.Name, &created, &baseline, &owner); err != nil {
+	if err := r.Scan(&d.ID, &d.Name, &created, &baseline, &owner, &profile); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Dog{}, ErrNotFound
 		}
@@ -526,7 +592,63 @@ func scanDog(r scanner) (Dog, error) {
 			return Dog{}, err
 		}
 	}
+	if profile.Valid {
+		if err := json.Unmarshal([]byte(profile.String), &d.Profile); err != nil {
+			return Dog{}, err
+		}
+	}
 	return d, nil
+}
+
+// AddChat appends messages to a dog's chat history.
+func (s *Store) AddChat(ctx context.Context, dogID int64, msgs ...ChatMessage) ([]ChatMessage, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	out := make([]ChatMessage, len(msgs))
+	for i, m := range msgs {
+		if m.CreatedAt.IsZero() {
+			m.CreatedAt = time.Now().UTC()
+		}
+		if err := tx.QueryRowContext(ctx,
+			`INSERT INTO chat_messages(dog_id, role, text, created_at) VALUES ($1, $2, $3, $4) RETURNING id`,
+			dogID, m.Role, m.Text, fmtTime(m.CreatedAt)).Scan(&m.ID); err != nil {
+			return nil, err
+		}
+		out[i] = m
+	}
+	return out, tx.Commit()
+}
+
+// Chat returns a dog's latest chat messages, oldest first.
+func (s *Store) Chat(ctx context.Context, dogID int64, limit int) ([]ChatMessage, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, role, text, created_at FROM chat_messages WHERE dog_id = $1 ORDER BY id DESC LIMIT $2`, dogID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	msgs := []ChatMessage{}
+	for rows.Next() {
+		var m ChatMessage
+		var created string
+		if err := rows.Scan(&m.ID, &m.Role, &m.Text, &created); err != nil {
+			return nil, err
+		}
+		m.CreatedAt = parseTime(created)
+		msgs = append(msgs, m)
+	}
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, rows.Err()
+}
+
+func (s *Store) ClearChat(ctx context.Context, dogID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM chat_messages WHERE dog_id = $1`, dogID)
+	return err
 }
 
 func fmtTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }

@@ -10,15 +10,31 @@ export type Baseline = {
   points: number;
 };
 
+// What the owner tells us about their dog; personalizes chat answers and alert tips.
+export type Profile = {
+  breed?: string;
+  age?: string;
+  weight?: string;
+  diet?: string;
+  health?: string;
+  triggers?: string;
+  calming?: string;
+  notes?: string;
+};
+
 export type Dog = {
   id: number;
   name: string;
   created_at: string;
   baseline?: Baseline;
+  profile: Profile;
 };
+
+export type ChatMessage = { id: number; role: 'user' | 'assistant'; text: string; created_at: string };
 
 export type Status = {
   dog_id: number;
+  seq: number; // pass back to status(id, seq) to wait for the next change
   state: State;
   rate_bpm: number;
   tension: number;
@@ -37,6 +53,7 @@ export type AlertRecord = {
   score: number;
   rate_bpm: number;
   tension: number;
+  tip?: string; // calming tip sent with the notification
 };
 
 // GPS reading from the collar.
@@ -72,9 +89,9 @@ export function normalizeServer(serverUrl: string) {
 export function createClient(serverUrl: string, token = '', onSignedOut?: () => void) {
   const base = normalizeServer(serverUrl);
 
-  async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  async function request<T>(method: string, path: string, body?: unknown, timeoutMs = 8000): Promise<T> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res: Response;
     try {
       res = await fetch(base + path, {
@@ -111,7 +128,20 @@ export function createClient(serverUrl: string, token = '', onSignedOut?: () => 
     listDogs: () => request<Dog[]>('GET', '/api/dogs'),
     createDog: (name: string) => request<Dog>('POST', '/api/dogs', { name }),
     getDog: (id: number) => request<Dog>('GET', `/api/dogs/${id}`),
-    status: (id: number) => request<Status>('GET', `/api/dogs/${id}/status`),
+    setProfile: (id: number, profile: Profile) => request<Dog>('PUT', `/api/dogs/${id}/profile`, profile),
+    chatHistory: (id: number) =>
+      request<{ enabled: boolean; messages: ChatMessage[] }>('GET', `/api/dogs/${id}/chat`),
+    // Answers can take a while, so allow longer than other calls.
+    chat: (id: number, text: string) =>
+      request<{ messages: ChatMessage[] }>('POST', `/api/dogs/${id}/chat`, { text }, 50000),
+    clearChat: (id: number) => request<void>('DELETE', `/api/dogs/${id}/chat`),
+    // With `after` (the seq of the status you have), the server holds the
+    // request until there's a newer status (or ~10 s pass), so changes show
+    // up immediately without fast polling.
+    status: (id: number, after?: number) =>
+      after === undefined
+        ? request<Status>('GET', `/api/dogs/${id}/status`)
+        : request<Status>('GET', `/api/dogs/${id}/status?after=${after}&wait=10`, undefined, 20000),
     alerts: (id: number, limit = 20) => request<AlertRecord[]>('GET', `/api/dogs/${id}/alerts?limit=${limit}`),
     recalibrate: (id: number) => request<Status>('POST', `/api/dogs/${id}/calibrate`),
     location: (id: number, minutes = 30) => request<DogLocation>('GET', `/api/dogs/${id}/location?minutes=${minutes}`),

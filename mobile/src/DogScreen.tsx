@@ -12,7 +12,7 @@ import { colors, fonts, radius, Tone, tones } from './theme';
 import { Button, Card, Icon, IconName, Pill, T } from './ui';
 import { ago, fmtDistance } from './units';
 
-const POLL_MS = 2000;
+const RETRY_MS = 2000;
 const OFFLINE_AFTER_MS = 10000;
 const CHART_WINDOW_MS = 5 * 60 * 1000;
 const LOCATION_POLL_MS = 5000;
@@ -34,10 +34,8 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [loc, setLoc] = useState<DogLocation | null>(null);
   const lastState = useRef<string | null>(null);
-  const lastLocPoll = useRef(0);
 
   const pollLocation = useCallback(async () => {
-    lastLocPoll.current = Date.now();
     setLoc(await client.location(dogId));
   }, [client, dogId]);
 
@@ -45,10 +43,8 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
     setAlerts(await client.alerts(dogId));
   }, [client, dogId]);
 
-  const poll = useCallback(async () => {
-    if (Date.now() - lastLocPoll.current >= LOCATION_POLL_MS) pollLocation().catch(() => {});
-    try {
-      const s = await client.status(dogId);
+  const applyStatus = useCallback(
+    (s: Status) => {
       setStatus(s);
       setError(null);
       if (!isOffline(s) && s.rate_bpm > 0) {
@@ -59,31 +55,62 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
         lastState.current = s.state;
         refreshAlerts().catch(() => {});
       }
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  }, [client, dogId, refreshAlerts, pollLocation]);
+    },
+    [refreshAlerts],
+  );
 
-  // Load the dog, then poll status while the app is in the foreground.
+  // Load the dog, then follow its status live while the app is in the
+  // foreground: each request waits on the server for the next change, so a
+  // new reading shows up as soon as the server has it.
   useEffect(() => {
     client.getDog(dogId).then(setDog, (e) => setError(e.message));
     refreshAlerts().catch(() => {});
-    poll();
-    let timer: ReturnType<typeof setInterval> | null = setInterval(poll, POLL_MS);
+
+    let stopped = false;
+    let running = false;
+    let active = AppState.currentState !== 'background';
+    let seq: number | undefined;
+
+    const follow = async () => {
+      if (running) return;
+      running = true;
+      while (!stopped && active) {
+        try {
+          const s = await client.status(dogId, seq);
+          if (stopped) break;
+          seq = s.seq;
+          applyStatus(s);
+        } catch (e) {
+          if (stopped) break;
+          setError((e as Error).message);
+          seq = undefined;
+          await new Promise((r) => setTimeout(r, RETRY_MS));
+        }
+      }
+      running = false;
+    };
+
+    const locate = () => {
+      if (active) pollLocation().catch(() => {});
+    };
+    follow();
+    locate();
+    const locTimer = setInterval(locate, LOCATION_POLL_MS);
+
     const sub = AppState.addEventListener('change', (st) => {
-      if (st === 'active' && !timer) {
-        poll();
-        timer = setInterval(poll, POLL_MS);
-      } else if (st !== 'active' && timer) {
-        clearInterval(timer);
-        timer = null;
+      active = st === 'active';
+      if (active) {
+        seq = undefined; // catch up right away
+        follow();
+        locate();
       }
     });
     return () => {
-      if (timer) clearInterval(timer);
+      stopped = true;
+      clearInterval(locTimer);
       sub.remove();
     };
-  }, [client, dogId, poll, refreshAlerts]);
+  }, [client, dogId, applyStatus, pollLocation, refreshAlerts]);
 
   // Register this phone/browser for push alerts about this dog.
   const turnOnPush = useCallback(
@@ -121,7 +148,11 @@ export function DogScreen({ client, dogId, onChangeDog, onSignOut }: Props) {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await Promise.all([poll(), pollLocation().catch(() => {}), refreshAlerts().catch(() => {})]);
+    await Promise.all([
+      client.status(dogId).then(applyStatus, (e) => setError(e.message)),
+      pollLocation().catch(() => {}),
+      refreshAlerts().catch(() => {}),
+    ]);
     setRefreshing(false);
   };
 

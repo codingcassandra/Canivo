@@ -15,8 +15,9 @@
 //	VAPID_PUBLIC_KEY   } browser push (web app / iPhone Home Screen / Apple Watch);
 //	VAPID_PRIVATE_KEY  } generate with: go run ./cmd/vapidkeys
 //	VAPID_SUBJECT      contact email or https URL, required by Apple for web push
-//	GEMINI_API_KEY     adds an AI-written calming tip to alert pushes (from
-//	                   https://aistudio.google.com/apikey); unset = fixed wording
+//	GEMINI_API_KEY     turns on the AI assistant: personalized calming tips in
+//	                   alert pushes and the in-app chat (key from
+//	                   https://aistudio.google.com/apikey); unset = fixed wording, no chat
 //	GEMINI_MODEL       Gemini model (default gemini-3.5-flash-lite)
 //	ALLOWED_ORIGINS    comma-separated web app origins allowed to call the API,
 //	                   e.g. https://canivo.vercel.app
@@ -85,7 +86,7 @@ func main() {
 	if key := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); key != "" {
 		opts.Advisor = &advice.Gemini{APIKey: key, Model: os.Getenv("GEMINI_MODEL")}
 	} else {
-		log.Print("calming tips disabled (GEMINI_API_KEY not set)")
+		log.Print("assistant disabled (GEMINI_API_KEY not set): no calming tips or chat")
 	}
 	for _, o := range strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",") {
 		if o = strings.TrimSpace(o); o != "" {

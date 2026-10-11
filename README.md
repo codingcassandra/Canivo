@@ -38,14 +38,21 @@ location. On Apple devices the app has an **Open Find My** button
 1. **Envelope** – the Nano sends the EMG envelope (muscle activity level) at 50 Hz.
 2. **Breaths** – each breath is a burst of respiratory-muscle activity. The
    server smooths the signal, subtracts a slow trend and counts rises above it
-   (`internal/breath`). It reports breaths/minute and average muscle tension over
-   a 15 s window.
+   (`internal/breath`). It reports breaths/minute from the last few breaths (within
+   15 s) and average muscle tension over the last 6 s.
 3. **Baseline** – every dog is different, so the first 2 minutes of data (dog
    calm!) become that dog's baseline. Re-run any time with `POST /calibrate`.
 4. **Arousal score** – `0.5·|rate z-score| + 0.5·(tension z-score, increases only)`.
    Rate counts in both directions because alert dogs often freeze and hold their
-   breath. Score ≥ 2.5 for 5 s → **alert** + push. Score < 1.5 for 10 s → calm.
+   breath. Score ≥ 2.5 for 3 s → **alert** + push. Score < 1.5 for 10 s → calm.
    Pushes are rate-limited to one per dog every 2 minutes (`internal/monitor`).
+
+**Speed.** A clear change in the dog alerts in about 6 s (a moderate one in
+about 9 s), and the app shows it about 1 s later: the bridge sends every 200 ms
+(`-send`), and the app's status request waits on the server for the next
+change instead of polling. `TestAlertLatency` and `TestCalmDogNeverAlerts`
+guard the speed vs. false-alarm trade-off; to go faster, lower `AlertSustain`
+in `monitor.DefaultConfig()`.
 
 ## Run it
 
@@ -174,7 +181,7 @@ sign-in, or the `API_KEY` (devices). Only register and login are open.
 | POST | `/api/dogs` | `{"name":"Rex"}`, owned by the signed-in owner |
 | GET | `/api/dogs`, `/api/dogs/{id}` | your dogs (all dogs with the API key); includes learned baseline. Another owner's dog is a 404 |
 | POST | `/api/dogs/{id}/samples` | `{"samples":[{"t":<millis>,"v":<value>}]}` (≤ 5000) → status |
-| GET | `/api/dogs/{id}/status` | `state` (`calibrating`/`calm`/`alert`), `rate_bpm`, `tension`, `score`, `calibration_progress` |
+| GET | `/api/dogs/{id}/status` | `state` (`calibrating`/`calm`/`alert`), `rate_bpm`, `tension`, `score`, `calibration_progress`, `seq`. With `?after=<seq>&wait=10` it waits until there's a newer status (max 10 s) |
 | POST | `/api/dogs/{id}/calibrate` | forget baseline, relearn from the next 2 min |
 | GET | `/api/dogs/{id}/alerts?limit=50` | alert history |
 | POST | `/api/dogs/{id}/push-tokens` | `{"token":"ExponentPushToken[...]"}` from the Expo app |

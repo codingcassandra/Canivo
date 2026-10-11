@@ -38,7 +38,7 @@ func DefaultConfig() Config {
 		WindowMs:      15000,
 		Calibration:   2 * time.Minute,
 		AlertScore:    2.5,
-		AlertSustain:  5 * time.Second,
+		AlertSustain:  3 * time.Second,
 		ClearScore:    1.5,
 		ClearSustain:  10 * time.Second,
 		RateWeight:    0.5,

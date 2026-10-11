@@ -64,11 +64,30 @@ export function Field({
       <T variant="label" style={{ marginBottom: 8 }}>
         {label}
       </T>
-      <View style={styles.field}>
+      <View style={[styles.field, input.multiline && styles.fieldMultiline]}>
         <Icon name={icon} size={20} color={colors.faint} />
-        <TextInput placeholderTextColor={colors.faint} {...input} style={styles.input} />
+        <TextInput
+          placeholderTextColor={colors.faint}
+          {...input}
+          style={[styles.input, input.multiline && styles.inputMultiline]}
+        />
         {right}
       </View>
+    </View>
+  );
+}
+
+// Top bar for screens opened from the dog screen.
+export function BackHeader({ title, onBack, right }: { title: string; onBack: () => void; right?: ReactNode }) {
+  return (
+    <View style={styles.backHeader}>
+      <Pressable onPress={onBack} hitSlop={10} accessibilityLabel="Back" style={styles.backButton}>
+        <Icon name="chevron-left" size={28} color={colors.primary} />
+      </Pressable>
+      <T variant="heading" style={{ flex: 1 }} numberOfLines={1}>
+        {title}
+      </T>
+      {right}
     </View>
   );
 }
@@ -114,6 +133,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
   },
   input: { flex: 1, fontFamily: fonts.semibold, fontSize: 16, color: colors.text, paddingVertical: 14 },
+  fieldMultiline: { alignItems: 'flex-start', paddingTop: 14 },
+  inputMultiline: { minHeight: 72, paddingTop: 0, textAlignVertical: 'top' },
+  backHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingTop: 12, paddingBottom: 12 },
+  backButton: { marginLeft: -8 },
   pill: {
     flexDirection: 'row',
     alignItems: 'center',

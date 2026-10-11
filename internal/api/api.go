@@ -52,6 +52,12 @@ type dogRuntime struct {
 	openAlert int64 // 0 when no alert is open
 	lastPush  time.Time
 	lastSeen  time.Time
+	chats     []time.Time // recent chat questions, for the rate limit
+
+	// seq counts status changes; changed is closed (and replaced) on each
+	// one, waking up apps waiting in GET /status?after=.
+	seq     uint64
+	changed chan struct{}
 
 	zone    *geo.Zone // nil = no safe zone set
 	fence   geo.Fence
@@ -105,6 +111,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/dogs", s.createDog)
 	mux.HandleFunc("GET /api/dogs", s.listDogs)
 	mux.HandleFunc("GET /api/dogs/{id}", s.getDog)
+	mux.HandleFunc("PUT /api/dogs/{id}/profile", s.setProfile)
+	mux.HandleFunc("GET /api/dogs/{id}/chat", s.chatHistory)
+	mux.HandleFunc("POST /api/dogs/{id}/chat", s.chat)
+	mux.HandleFunc("DELETE /api/dogs/{id}/chat", s.clearChat)
 	mux.HandleFunc("POST /api/dogs/{id}/samples", s.ingest)
 	mux.HandleFunc("GET /api/dogs/{id}/status", s.status)
 	mux.HandleFunc("POST /api/dogs/{id}/calibrate", s.calibrate)
@@ -191,15 +201,162 @@ func (s *Server) getDog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, d)
 }
 
+const maxProfileField = 1000
+
+func (s *Server) setProfile(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.dogID(w, r)
+	if !ok {
+		return
+	}
+	var p store.Profile
+	if !decode(w, r, &p) {
+		return
+	}
+	for _, f := range []*string{&p.Breed, &p.Age, &p.Weight, &p.Diet, &p.Health, &p.Triggers, &p.Calming, &p.Notes} {
+		*f = strings.TrimSpace(*f)
+		if len([]rune(*f)) > maxProfileField {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("each profile field must be at most %d characters", maxProfileField))
+			return
+		}
+	}
+	if err := s.store.SetProfile(r.Context(), id, p); err != nil {
+		storeError(w, err)
+		return
+	}
+	d, err := s.store.Dog(r.Context(), id)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
+const (
+	maxChatMessage = 2000             // characters in one question
+	chatContext    = 20               // earlier messages the assistant sees
+	chatLimit      = 20               // questions per dog...
+	chatWindow     = 10 * time.Minute // ...in this window
+)
+
+func (s *Server) chatHistory(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.dogID(w, r)
+	if !ok {
+		return
+	}
+	msgs, err := s.store.Chat(r.Context(), id, 100)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": s.opts.Advisor != nil, "messages": msgs})
+}
+
+// chat answers the owner's question about their dog, e.g. {"text":"What can Rex snack on?"},
+// and returns the question and answer as saved: {"messages":[{...user},{...assistant}]}.
+func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.dogID(w, r)
+	if !ok {
+		return
+	}
+	if s.opts.Advisor == nil {
+		writeError(w, http.StatusServiceUnavailable, "The assistant isn’t set up on the server (GEMINI_API_KEY).")
+		return
+	}
+	var req struct {
+		Text string `json:"text"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	req.Text = strings.TrimSpace(req.Text)
+	if req.Text == "" || len([]rune(req.Text)) > maxChatMessage {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("message must be 1 to %d characters", maxChatMessage))
+		return
+	}
+	rt, err := s.runtime(r.Context(), id)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	if !rt.allowChat(s.now()) {
+		writeError(w, http.StatusTooManyRequests, "That’s a lot of questions! Please wait a few minutes and try again.")
+		return
+	}
+
+	history, err := s.store.Chat(r.Context(), id, chatContext)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	d, err := s.adviceDog(r.Context(), id, 0)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	asked := store.ChatMessage{Role: "user", Text: req.Text, CreatedAt: s.now().UTC()}
+	history = append(history, asked)
+
+	// Answers can take a while; give this request longer than the server default.
+	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(50 * time.Second))
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	reply, err := s.opts.Advisor.Chat(ctx, d, history)
+	if err != nil {
+		log.Printf("dog %d: chat: %v", id, err)
+		writeError(w, http.StatusBadGateway, "The assistant couldn’t answer right now. Please try again.")
+		return
+	}
+	// Save the question only with its answer, so a failed try leaves no gap.
+	saved, err := s.store.AddChat(r.Context(), id, asked,
+		store.ChatMessage{Role: "assistant", Text: reply, CreatedAt: s.now().UTC()})
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": saved})
+}
+
+func (s *Server) clearChat(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.dogID(w, r)
+	if !ok {
+		return
+	}
+	if err := s.store.ClearChat(r.Context(), id); err != nil {
+		serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// allowChat records a chat question and reports whether it is within the
+// per-dog limit, which keeps Gemini costs bounded.
+func (rt *dogRuntime) allowChat(now time.Time) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	recent := rt.chats[:0]
+	for _, t := range rt.chats {
+		if now.Sub(t) < chatWindow {
+			recent = append(recent, t)
+		}
+	}
+	rt.chats = recent
+	if len(rt.chats) >= chatLimit {
+		return false
+	}
+	rt.chats = append(rt.chats, now)
+	return true
+}
+
 type statusResponse struct {
-	DogID int64 `json:"dog_id"`
+	DogID int64  `json:"dog_id"`
+	Seq   uint64 `json:"seq"` // pass back as ?after= to wait for the next change
 	monitor.Status
 	AlertID  int64      `json:"alert_id,omitempty"`
 	LastSeen *time.Time `json:"last_seen,omitempty"`
 }
 
 func (rt *dogRuntime) statusLocked(id int64) statusResponse {
-	resp := statusResponse{DogID: id, Status: rt.mon.Status(), AlertID: rt.openAlert}
+	resp := statusResponse{DogID: id, Seq: rt.seq, Status: rt.mon.Status(), AlertID: rt.openAlert}
 	if !rt.lastSeen.IsZero() {
 		t := rt.lastSeen
 		resp.LastSeen = &t
@@ -233,7 +390,11 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.lastSeen = s.now().UTC()
+	before := rt.mon.Status()
 	_, events := rt.mon.Ingest(req.Samples)
+	if rt.mon.Status() != before {
+		rt.bumpLocked()
+	}
 	for _, ev := range events {
 		if err := s.handleEvent(r.Context(), id, rt, ev); err != nil {
 			serverError(w, err)
@@ -279,7 +440,7 @@ func (s *Server) handleEvent(ctx context.Context, dogID int64, rt *dogRuntime, e
 func (s *Server) push(dogID, alertID int64, name string, ev monitor.Event, b monitor.Baseline) {
 	s.send(dogID, notify.Message{
 		Title: name + " is on high alert",
-		Body:  alertBody(name, ev, b, s.suggest(dogID, name, ev, b)),
+		Body:  alertBody(name, ev, b, s.suggest(dogID, alertID, ev, b)),
 		Data:  map[string]any{"type": "alert", "dog_id": dogID, "alert_id": alertID},
 	})
 }
@@ -322,22 +483,53 @@ func (s *Server) send(dogID int64, msg notify.Message) {
 	}
 }
 
-// suggest asks the advisor for a calming tip, or returns "" if there is no
-// advisor or it fails or is slow; the alert must still go out promptly.
-func (s *Server) suggest(dogID int64, name string, ev monitor.Event, b monitor.Baseline) string {
+// suggest asks the advisor for a calming tip personalized to the dog, and
+// saves it on the alert so the app can show it too. It returns "" if there is
+// no advisor or it fails or is slow; the alert must still go out promptly.
+func (s *Server) suggest(dogID, alertID int64, ev monitor.Event, b monitor.Baseline) string {
 	if s.opts.Advisor == nil {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	tip, err := s.opts.Advisor.Suggest(ctx, advice.Situation{
-		Name: name, RateBPM: ev.RateBPM, UsualRateBPM: b.RateMean, TensionUpPct: tensionUpPct(ev, b),
-	})
+	d, err := s.adviceDog(ctx, dogID, alertID)
 	if err != nil {
 		log.Printf("dog %d: calming tip: %v", dogID, err)
 		return ""
 	}
+	d.UsualRateBPM = b.RateMean
+	tip, err := s.opts.Advisor.Suggest(ctx, advice.Situation{Dog: d, RateBPM: ev.RateBPM, TensionUpPct: tensionUpPct(ev, b)})
+	if err != nil {
+		log.Printf("dog %d: calming tip: %v", dogID, err)
+		return ""
+	}
+	if err := s.store.SetAlertTip(context.Background(), alertID, tip); err != nil {
+		log.Printf("dog %d: save tip: %v", dogID, err)
+	}
 	return tip
+}
+
+// adviceDog gathers what the assistant should know about a dog: its profile,
+// calm baseline and recent alerts (leaving out skipAlert, the one in progress).
+func (s *Server) adviceDog(ctx context.Context, dogID, skipAlert int64) (advice.Dog, error) {
+	dog, err := s.store.Dog(ctx, dogID)
+	if err != nil {
+		return advice.Dog{}, err
+	}
+	alerts, err := s.store.Alerts(ctx, dogID, 30)
+	if err != nil {
+		return advice.Dog{}, err
+	}
+	d := advice.Dog{Name: dog.Name, Profile: dog.Profile}
+	if dog.Baseline != nil {
+		d.UsualRateBPM = dog.Baseline.RateMean
+	}
+	for _, a := range alerts {
+		if a.ID != skipAlert {
+			d.RecentAlerts = append(d.RecentAlerts, a)
+		}
+	}
+	return d, nil
 }
 
 // alertBody explains what tripped the alert relative to the dog's normal, then
@@ -361,10 +553,42 @@ func tensionUpPct(ev monitor.Event, b monitor.Baseline) float64 {
 	return (ev.Tension/b.TensionMean - 1) * 100
 }
 
+// maxStatusWait caps how long GET /status?after= holds a request open. It
+// must stay under the HTTP server's WriteTimeout.
+const maxStatusWait = 10 * time.Second
+
+// bumpLocked records a status change and wakes up waiting requests.
+func (rt *dogRuntime) bumpLocked() {
+	rt.seq++
+	close(rt.changed)
+	rt.changed = make(chan struct{})
+}
+
+// status returns the live status. With ?after=<seq> it waits (up to
+// ?wait= seconds, default and max 10) until the status is newer than seq, so
+// the app sees each change the moment it happens without polling fast.
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.dogID(w, r)
 	if !ok {
 		return
+	}
+	var after uint64
+	wait := time.Duration(0)
+	if v := r.URL.Query().Get("after"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "after must be a status seq number")
+			return
+		}
+		after, wait = n, maxStatusWait
+		if v := r.URL.Query().Get("wait"); v != "" {
+			secs, err := strconv.Atoi(v)
+			if err != nil || secs < 0 || time.Duration(secs)*time.Second > maxStatusWait {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("wait must be 0-%d seconds", int(maxStatusWait.Seconds())))
+				return
+			}
+			wait = time.Duration(secs) * time.Second
+		}
 	}
 	rt, err := s.runtime(r.Context(), id)
 	if err != nil {
@@ -372,6 +596,20 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rt.mu.Lock()
+	if wait > 0 && rt.seq == after {
+		ch := rt.changed
+		rt.mu.Unlock()
+		timer := time.NewTimer(wait)
+		select {
+		case <-ch:
+		case <-timer.C:
+		case <-r.Context().Done():
+			timer.Stop()
+			return
+		}
+		timer.Stop()
+		rt.mu.Lock()
+	}
 	defer rt.mu.Unlock()
 	writeJSON(w, http.StatusOK, rt.statusLocked(id))
 }
@@ -402,6 +640,7 @@ func (s *Server) calibrate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rt.mon.Recalibrate()
+	rt.bumpLocked()
 	writeJSON(w, http.StatusOK, rt.statusLocked(id))
 }
 
@@ -718,7 +957,7 @@ func (s *Server) runtime(ctx context.Context, id int64) (*dogRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
-	rt := &dogRuntime{name: d.Name, ownerID: d.OwnerID, mon: monitor.New(s.cfg, d.Baseline)}
+	rt := &dogRuntime{name: d.Name, ownerID: d.OwnerID, mon: monitor.New(s.cfg, d.Baseline), changed: make(chan struct{})}
 	if rt.zone, err = s.store.Zone(ctx, id); err != nil {
 		return nil, err
 	}
